@@ -15,7 +15,7 @@
 
 独立修复分支：`codex/delay-warm-fallback`。启用 unified-delay 时，原实现会在可选的第二次请求失败后把等待时间计入首轮延迟；API 还可能在已有有效首轮结果时返回超时。这里保留首轮真实测量值，只有二轮成功才改用二轮值。首轮失败仍报错，不增加探测次数或延长预算。测试以本地服务器确定性复现旧错误，再验证修复与真实失败识别。
 
-NewNB 的另一类冷握手问题来自服务端两个通配入口重叠，已在 Xray Beta 单独修复；[调查与实测](https://github.com/Chen017/Xray/blob/codex/beta/docs/xhttp-delay-investigation-2026-10-17.md)。窗口选项不会修复真实断线，目标网站真实超时仍应显示为失败。
+NewNB 的另一类冷握手问题来自服务端两个通配入口重叠，修复已随 Xray v2.7.8 合并到 main；[调查与实测](https://github.com/Chen017/Xray/blob/main/docs/xhttp-delay-investigation-2026-10-17.md)。窗口选项不会修复真实断线，目标网站真实超时仍应显示为失败。
 
 ## 配置
 
