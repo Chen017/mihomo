@@ -16,7 +16,7 @@ WORK = ROOT / '.local'
 SOURCE = WORK / 'source'
 DIST = ROOT / 'dist'
 PLAN = WORK / 'plan.json'
-PATCH = ROOT / 'patches' / 'xhttp-h2-window.patch'
+PATCHES = sorted((ROOT / 'patches').glob('*.patch'))
 UPSTREAM = 'MetaCubeX/mihomo'
 FORK = 'Chen017/mihomo'
 
@@ -43,7 +43,8 @@ def prepare(tag):
         raise RuntimeError('Only official stable releases are accepted')
     run('git', 'fetch', '--no-tags', f'https://github.com/{UPSTREAM}.git', f'refs/tags/{tag}')
     upstream_sha = run('git', 'rev-parse', 'FETCH_HEAD^{commit}', capture=True)
-    patch_sha = hashlib.sha256(PATCH.read_bytes()).hexdigest()
+    patch_files = sorted((ROOT / 'patches').rglob('*.patch'))
+    patch_sha = hashlib.sha256(b''.join(p.relative_to(ROOT).as_posix().encode() + b'\0' + p.read_bytes() for p in patch_files)).hexdigest()
     version = f'{tag}-window.{upstream_sha[:8]}.{patch_sha[:8]}'
     existing = subprocess.run(['gh', 'api', f'repos/{FORK}/releases/tags/{version}'],
                               capture_output=True, text=True)
@@ -65,18 +66,29 @@ def prepare(tag):
     if SOURCE.exists():
         raise RuntimeError(f'{SOURCE} already exists; inspect it or use a fresh clone')
     run('git', 'worktree', 'add', '--detach', str(SOURCE), upstream_sha)
-    applicable = subprocess.run(['git', 'apply', '--check', str(PATCH)], cwd=SOURCE,
-                                capture_output=True).returncode == 0
-    if applicable:
-        run('git', 'apply', str(PATCH), cwd=SOURCE)
-        plan['feature_source'] = 'local patch'
-    elif subprocess.run(['git', 'apply', '--reverse', '--check', str(PATCH)], cwd=SOURCE,
-                        capture_output=True).returncode == 0:
-        plan['feature_source'] = 'already present upstream'
-    else:
-        raise RuntimeError('Upstream changed: patch does not apply cleanly; no release will be published')
+    plan['patches'] = []
+    paths = set()
+    for patch in PATCHES:
+        candidates = [patch, *sorted((ROOT / 'patches' / 'compat').glob(patch.stem + '-*.patch'))]
+        selected = next((p for p in candidates if subprocess.run(['git', 'apply', '--check', str(p)], cwd=SOURCE, capture_output=True).returncode == 0), None)
+        present = next((p for p in candidates if subprocess.run(['git', 'apply', '--reverse', '--check', str(p)], cwd=SOURCE, capture_output=True).returncode == 0), None)
+        if selected is not None:
+            run('git', 'apply', str(selected), cwd=SOURCE)
+            mode = 'local patch'
+        elif present is not None:
+            selected = present
+            mode = 'already present upstream'
+        else:
+            # A conflicted merge exits nonzero and stops this run before tests/build/publish.
+            run('git', 'apply', '--3way', str(patch), cwd=SOURCE)
+            selected = patch
+            mode = 'clean three-way merge'
+        for line in run('git', 'apply', '--numstat', str(selected), cwd=SOURCE, capture=True).splitlines():
+            paths.add(line.split('\t', 2)[2])
+        plan['patches'].append({'name': selected.relative_to(ROOT).as_posix(), 'sha256': hashlib.sha256(selected.read_bytes()).hexdigest(), 'mode': mode})
+    plan['modified_paths'] = sorted(paths)
     save(plan)
-    print(f'Prepared {version} ({plan["feature_source"]}).', flush=True)
+    print(f'Prepared {version}: {plan["patches"]}.', flush=True)
 
 
 def build():
@@ -85,15 +97,17 @@ def build():
         return
     env = dict(os.environ, CGO_ENABLED='0', GOTOOLCHAIN='local', GOFLAGS='-mod=readonly')
     run('go', 'test', '-tags', 'with_gvisor', './transport/xhttp', './adapter/outbound',
-        './adapter', '-count=1', cwd=SOURCE, env=env)
-    if plan['feature_source'] == 'local patch':
-        run('git', 'add', 'adapter/outbound/vless.go', 'adapter/outbound/vless_xhttp_window_test.go',
-            'transport/xhttp/client.go', 'transport/xhttp/window_test.go', 'docs/config.yaml', cwd=SOURCE)
+        './adapter', './hub/route', '-count=1', cwd=SOURCE, env=env)
+    run('git', 'add', '--', *plan['modified_paths'], cwd=SOURCE)
+    changed = subprocess.run(['git', 'diff', '--cached', '--quiet'], cwd=SOURCE).returncode
+    if changed not in (0, 1):
+        raise RuntimeError('Unable to inspect patched source index')
+    if changed:
         date = run('git', 'show', '-s', '--format=%cI', plan['upstream_commit'], cwd=SOURCE, capture=True)
         commit_env = dict(env, GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
         run('git', '-c', 'user.name=github-actions[bot]',
             '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com',
-            'commit', '-m', f'feat: configure XHTTP H2 receive window ({plan["upstream_tag"]})',
+            'commit', '-m', f'feat: apply maintained transport patches ({plan["upstream_tag"]})',
             cwd=SOURCE, env=commit_env)
     plan['source_commit'] = run('git', 'rev-parse', 'HEAD', cwd=SOURCE, capture=True)
     plan['go_version'] = run('go', 'version', cwd=SOURCE, capture=True)
@@ -138,14 +152,14 @@ def publish():
     run('git', 'tag', version, plan['source_commit'])
     run('git', '-c', 'credential.helper=', '-c', 'credential.helper=!gh auth git-credential',
         'push', 'origin', f'refs/tags/{version}')
-    notes = (f'Unofficial build of {UPSTREAM} {plan["upstream_tag"]} with an opt-in XHTTP H2 stream receive window. '
-             'Defaults are unchanged. See WINDOW-CORE.md for configuration and rollback.\n\n'
+    notes = (f'Unofficial build of {UPSTREAM} {plan["upstream_tag"]}: configurable XHTTP H2 window and a unified-delay fallback fix. '
+             'Window defaults are unchanged; no extra retries or timeout extensions. See WINDOW-CORE.md for setup and rollback.\n\n'
              f'Upstream: `{plan["upstream_commit"]}`\nPatch SHA256: `{plan["patch_sha256"]}`\n'
              f'Source: `{plan["source_commit"]}`\nCompiler: `{plan["go_version"]}`\n')
     notes_file = WORK / 'release-notes.md'
     notes_file.write_text(notes, encoding='utf-8')
     run('gh', 'release', 'create', version, '--repo', FORK, '--target', plan['source_commit'],
-        '--title', f'{plan["upstream_tag"]} + configurable XHTTP H2 window', '--latest',
+        '--title', f'{plan["upstream_tag"]} + XHTTP window and delay fixes', '--latest',
         '--notes-file', str(notes_file), *[str(p) for p in sorted(DIST.iterdir())])
 
 

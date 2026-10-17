@@ -1,4 +1,4 @@
-> Personal fork: [configurable XHTTP H2 window, downloads and setup](WINDOW-CORE.md). Upstream defaults are unchanged unless explicitly configured.
+> Personal fork: [configurable XHTTP H2 window, downloads and setup](WINDOW-CORE.md). Window defaults are unchanged unless explicitly configured.
 
 <h1 align="center">
   <img src="Meta.png" alt="Meta Kennel" width="200">

@@ -1,17 +1,21 @@
 # 可配置 XHTTP H2 接收窗口的个人构建
 
-基于 [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) 最新**正式版**，只增加可选窗口参数。官方 PR：[3331](https://github.com/MetaCubeX/mihomo/pull/3331)。这是非官方构建；不填新参数时行为保持上游默认。Xray 服务端继续使用 26.3.27，无需修改。
+基于 [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) 最新**正式版**，增加可选窗口参数，并修复 unified-delay 已成功首轮测量的回退处理。窗口官方 PR：[3331](https://github.com/MetaCubeX/mihomo/pull/3331)。这是非官方构建；不填窗口参数时窗口行为保持上游默认。Xray 核心继续使用 26.3.27。
 
 ## 下载与更新
 
 - [下载最新构建](https://github.com/Chen017/mihomo/releases/latest)：Windows 64 位选 `mihomo-windows-amd64-…zip`，解压得到 `mihomo.exe`。Linux amd64 提供 gzip。
 - [构建状态](https://github.com/Chen017/mihomo/actions/workflows/window-release.yml)：每天 11:17（Asia/Singapore）检查上游最新正式版，也可点 **Run workflow**。上游更新后自动取源码、检查并应用补丁、测试、编译、发布。
-- 相同上游提交和补丁已发布时跳过。上游已经包含完全相同的修改时无需重复注入；补丁冲突或测试失败时停止发布，上一版 Release 保留。
+- 相同上游提交和补丁已发布时跳过。依次检查每个补丁及已验证的兼容版本；上游已包含的修改不重复注入，兼容的上下文变化可通过干净的三方合并处理；冲突或测试失败时停止发布，上一版 Release 保留。
 - 定时任务不自动替换电脑里的核心。每次更新从本 Fork 下载；Clash Verge 自带的“更新内核”会下载官方版，可能覆盖个人构建。
 - 每版附 `checksums.txt`、`provenance.json`，记录上游提交、补丁 SHA256、源码提交和编译器。源代码标签对应实际打补丁后的代码，不是仅标记旧维护分支。
 - GitHub 可能延迟定时任务；公开仓库长期无活动时可能停用 schedule，此时在 Actions 重新启用即可。
 
 维护分支：`codex/window-builds`（本 Fork 默认分支）；官方 PR 分支：`codex/xhttp-h2-window`。定时构建从上游正式版重新取源码，维护分支中的 Go 代码本身不会被机器人强制覆盖；以 Release 的源代码标签和 provenance 为当次构建依据。
+
+独立修复分支：`codex/delay-warm-fallback`。启用 unified-delay 时，原实现会在可选的第二次请求失败后把等待时间计入首轮延迟；API 还可能在已有有效首轮结果时返回超时。这里保留首轮真实测量值，只有二轮成功才改用二轮值。首轮失败仍报错，不增加探测次数或延长预算。测试以本地服务器确定性复现旧错误，再验证修复与真实失败识别。
+
+NewNB 的另一类冷握手问题来自服务端两个通配入口重叠，已在 Xray Beta 单独修复；[调查与实测](https://github.com/Chen017/Xray/blob/codex/beta/docs/xhttp-delay-investigation-2026-10-17.md)。窗口选项不会修复真实断线，目标网站真实超时仍应显示为失败。
 
 ## 配置
 

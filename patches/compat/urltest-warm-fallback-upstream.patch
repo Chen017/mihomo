@@ -1,0 +1,154 @@
+diff --git a/adapter/adapter.go b/adapter/adapter.go
+index 422232b3362db9afc6fac34450f9b254178b33c8..0eb569175858c5b5aa5a5f5aed56da7aa3f8a241 100644
+--- a/adapter/adapter.go
++++ b/adapter/adapter.go
+@@ -255,6 +255,7 @@ func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.In
+ 	}
+ 
+ 	_ = resp.Body.Close()
++	measured := time.Since(start)
+ 
+ 	if unifiedDelay {
+ 		second := time.Now()
+@@ -264,7 +265,7 @@ func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.In
+ 		if ignoredErr == nil {
+ 			resp = secondResp
+ 			_ = resp.Body.Close()
+-			start = second
++			measured = time.Since(second)
+ 		} else {
+ 			if strings.HasPrefix(url, "http://") {
+ 				log.Errorln("%s failed to get the second response from %s: %v", p.Name(), url, ignoredErr)
+@@ -274,7 +275,7 @@ func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.In
+ 	}
+ 
+ 	satisfied = resp != nil && (expectedStatus == nil || expectedStatus.Check(uint16(resp.StatusCode)))
+-	t = uint16(time.Since(start) / time.Millisecond)
++	t = uint16(measured / time.Millisecond)
+ 	if t == 0 {
+ 		// a zero delay means a failed test to callers, so report a test
+ 		// that completed in under a millisecond as 1 ms
+diff --git a/adapter/urltest_fallback_test.go b/adapter/urltest_fallback_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..c2a96f872c0aab7a441ec5a006ffcd3e8ac4bc5f
+--- /dev/null
++++ b/adapter/urltest_fallback_test.go
+@@ -0,0 +1,57 @@
++package adapter
++
++import (
++	"context"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/metacubex/http"
++	"github.com/metacubex/http/httptest"
++	"github.com/metacubex/mihomo/adapter/outbound"
++)
++
++func TestURLTestKeepsSuccessfulFirstMeasurement(t *testing.T) {
++	previous := UnifiedDelay.Load()
++	UnifiedDelay.Store(true)
++	defer UnifiedDelay.Store(previous)
++	var calls atomic.Int32
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if calls.Add(1) == 1 {
++			time.Sleep(20 * time.Millisecond)
++			w.WriteHeader(http.StatusNoContent)
++			return
++		}
++		<-r.Context().Done()
++	}))
++	defer server.Close()
++	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
++	defer cancel()
++	proxy := NewProxy(outbound.NewDirect())
++	delay, err := proxy.URLTest(ctx, server.URL, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if calls.Load() != 2 {
++		t.Fatalf("requests = %d, want 2", calls.Load())
++	}
++	if delay == 0 || delay >= 400 {
++		t.Fatalf("delay = %d ms; failed optional request must not inflate the first measurement", delay)
++	}
++}
++
++func TestURLTestReportsPositiveFastResponse(t *testing.T) {
++	previous := UnifiedDelay.Load()
++	UnifiedDelay.Store(false)
++	defer UnifiedDelay.Store(previous)
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		w.WriteHeader(http.StatusNoContent)
++	}))
++	defer server.Close()
++	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
++	defer cancel()
++	delay, err := NewProxy(outbound.NewDirect()).URLTest(ctx, server.URL, nil)
++	if err != nil || delay == 0 {
++		t.Fatalf("successful request: delay=%d err=%v", delay, err)
++	}
++}
+diff --git a/hub/route/proxies.go b/hub/route/proxies.go
+index e8623b52bbc024305ad891d6e90b5933ffbfca38..645810d06a5eff7524b81394314176ba6b3e563d 100644
+--- a/hub/route/proxies.go
++++ b/hub/route/proxies.go
+@@ -126,7 +126,9 @@ func getProxyDelay(w http.ResponseWriter, r *http.Request) {
+ 	defer cancel()
+ 
+ 	delay, err := proxy.URLTest(ctx, url, expectedStatus)
+-	if ctx.Err() != nil {
++	// URLTest may retain a successful first measurement when the optional
++	// unified-delay request exhausts the remaining budget.
++	if ctx.Err() != nil && (err != nil || delay == 0) {
+ 		render.Status(r, http.StatusGatewayTimeout)
+ 		render.JSON(w, r, ErrRequestTimeout)
+ 		return
+diff --git a/hub/route/proxies_delay_test.go b/hub/route/proxies_delay_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2d434bb3e57356499feab23e110eb0e07f228384
+--- /dev/null
++++ b/hub/route/proxies_delay_test.go
+@@ -0,0 +1,40 @@
++package route
++
++import (
++	"context"
++	"testing"
++
++	"github.com/metacubex/http"
++	"github.com/metacubex/http/httptest"
++	"github.com/metacubex/mihomo/common/utils"
++	C "github.com/metacubex/mihomo/constant"
++)
++
++type fallbackDelayProxy struct {
++	C.Proxy
++	measured bool
++}
++
++func (p fallbackDelayProxy) URLTest(ctx context.Context, _ string, _ utils.IntRanges[uint16]) (uint16, error) {
++	<-ctx.Done()
++	if p.measured {
++		return 25, nil
++	}
++	return 0, ctx.Err()
++}
++
++func TestProxyDelayPreservesMeasuredFallback(t *testing.T) {
++	for _, measured := range []bool{true, false} {
++		req := httptest.NewRequest(http.MethodGet, "/?timeout=10&url=https%3A%2F%2Fexample.test", nil)
++		req = req.WithContext(context.WithValue(req.Context(), CtxKeyProxy, fallbackDelayProxy{measured: measured}))
++		response := httptest.NewRecorder()
++		getProxyDelay(response, req)
++		want := http.StatusGatewayTimeout
++		if measured {
++			want = http.StatusOK
++		}
++		if response.Code != want {
++			t.Fatalf("measured=%v: status=%d, want %d", measured, response.Code, want)
++		}
++	}
++}
