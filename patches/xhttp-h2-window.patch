@@ -1,0 +1,319 @@
+diff --git a/adapter/outbound/vless.go b/adapter/outbound/vless.go
+index 1e5b168f..1a1dd53d 100644
+--- a/adapter/outbound/vless.go
++++ b/adapter/outbound/vless.go
+@@ -91,31 +91,32 @@ type VlessOption struct {
+ }
+ 
+ type XHTTPOptions struct {
+-	Path                 string                 `proxy:"path,omitempty"`
+-	Host                 string                 `proxy:"host,omitempty"`
+-	Mode                 string                 `proxy:"mode,omitempty"`
+-	Headers              map[string]string      `proxy:"headers,omitempty"`
+-	NoGRPCHeader         bool                   `proxy:"no-grpc-header,omitempty"`
+-	XPaddingBytes        string                 `proxy:"x-padding-bytes,omitempty"`
+-	XPaddingObfsMode     bool                   `proxy:"x-padding-obfs-mode,omitempty"`
+-	XPaddingKey          string                 `proxy:"x-padding-key,omitempty"`
+-	XPaddingHeader       string                 `proxy:"x-padding-header,omitempty"`
+-	XPaddingPlacement    string                 `proxy:"x-padding-placement,omitempty"`
+-	XPaddingMethod       string                 `proxy:"x-padding-method,omitempty"`
+-	UplinkHTTPMethod     string                 `proxy:"uplink-http-method,omitempty"`
+-	SessionPlacement     string                 `proxy:"session-placement,omitempty"`
+-	SessionKey           string                 `proxy:"session-key,omitempty"`
+-	SessionTable         string                 `proxy:"session-table,omitempty"`
+-	SessionLength        string                 `proxy:"session-length,omitempty"`
+-	SeqPlacement         string                 `proxy:"seq-placement,omitempty"`
+-	SeqKey               string                 `proxy:"seq-key,omitempty"`
+-	UplinkDataPlacement  string                 `proxy:"uplink-data-placement,omitempty"`
+-	UplinkDataKey        string                 `proxy:"uplink-data-key,omitempty"`
+-	UplinkChunkSize      string                 `proxy:"uplink-chunk-size,omitempty"`
+-	ScMaxEachPostBytes   string                 `proxy:"sc-max-each-post-bytes,omitempty"`
+-	ScMinPostsIntervalMs string                 `proxy:"sc-min-posts-interval-ms,omitempty"`
+-	ReuseSettings        *XHTTPReuseSettings    `proxy:"reuse-settings,omitempty"` // aka XMUX
+-	DownloadSettings     *XHTTPDownloadSettings `proxy:"download-settings,omitempty"`
++	Path                        string                 `proxy:"path,omitempty"`
++	Host                        string                 `proxy:"host,omitempty"`
++	Mode                        string                 `proxy:"mode,omitempty"`
++	Headers                     map[string]string      `proxy:"headers,omitempty"`
++	NoGRPCHeader                bool                   `proxy:"no-grpc-header,omitempty"`
++	XPaddingBytes               string                 `proxy:"x-padding-bytes,omitempty"`
++	XPaddingObfsMode            bool                   `proxy:"x-padding-obfs-mode,omitempty"`
++	XPaddingKey                 string                 `proxy:"x-padding-key,omitempty"`
++	XPaddingHeader              string                 `proxy:"x-padding-header,omitempty"`
++	XPaddingPlacement           string                 `proxy:"x-padding-placement,omitempty"`
++	XPaddingMethod              string                 `proxy:"x-padding-method,omitempty"`
++	UplinkHTTPMethod            string                 `proxy:"uplink-http-method,omitempty"`
++	SessionPlacement            string                 `proxy:"session-placement,omitempty"`
++	SessionKey                  string                 `proxy:"session-key,omitempty"`
++	SessionTable                string                 `proxy:"session-table,omitempty"`
++	SessionLength               string                 `proxy:"session-length,omitempty"`
++	SeqPlacement                string                 `proxy:"seq-placement,omitempty"`
++	SeqKey                      string                 `proxy:"seq-key,omitempty"`
++	UplinkDataPlacement         string                 `proxy:"uplink-data-placement,omitempty"`
++	UplinkDataKey               string                 `proxy:"uplink-data-key,omitempty"`
++	UplinkChunkSize             string                 `proxy:"uplink-chunk-size,omitempty"`
++	ScMaxEachPostBytes          string                 `proxy:"sc-max-each-post-bytes,omitempty"`
++	ScMinPostsIntervalMs        string                 `proxy:"sc-min-posts-interval-ms,omitempty"`
++	H2MaxReceiveBufferPerStream int                    `proxy:"h2-max-receive-buffer-per-stream,omitempty"`
++	ReuseSettings               *XHTTPReuseSettings    `proxy:"reuse-settings,omitempty"` // aka XMUX
++	DownloadSettings            *XHTTPDownloadSettings `proxy:"download-settings,omitempty"`
+ }
+ 
+ type XHTTPReuseSettings struct {
+@@ -129,10 +130,11 @@ type XHTTPReuseSettings struct {
+ 
+ type XHTTPDownloadSettings struct {
+ 	// xhttp part
+-	Path          *string             `proxy:"path,omitempty"`
+-	Host          *string             `proxy:"host,omitempty"`
+-	Headers       *map[string]string  `proxy:"headers,omitempty"`
+-	ReuseSettings *XHTTPReuseSettings `proxy:"reuse-settings,omitempty"` // aka XMUX
++	Path                        *string             `proxy:"path,omitempty"`
++	Host                        *string             `proxy:"host,omitempty"`
++	Headers                     *map[string]string  `proxy:"headers,omitempty"`
++	ReuseSettings               *XHTTPReuseSettings `proxy:"reuse-settings,omitempty"` // aka XMUX
++	H2MaxReceiveBufferPerStream *int                `proxy:"h2-max-receive-buffer-per-stream,omitempty"`
+ 	// proxy part
+ 	Server            *string           `proxy:"server,omitempty"`
+ 	Port              *int              `proxy:"port,omitempty"`
+@@ -624,6 +626,10 @@ func NewVless(option VlessOption) (*Vless, error) {
+ 			}
+ 		}
+ 
++		h2ReceiveWindow := option.XHTTPOpts.H2MaxReceiveBufferPerStream
++		if h2ReceiveWindow < 0 || int64(h2ReceiveWindow) > 1<<31-1 {
++			return nil, fmt.Errorf("xhttp h2-max-receive-buffer-per-stream must be between 0 and 2147483647 bytes")
++		}
+ 		var hKeepAlivePeriod time.Duration
+ 
+ 		var reuseCfg *xhttp.ReuseConfig
+@@ -713,6 +719,7 @@ func NewVless(option VlessOption) (*Vless, error) {
+ 				},
+ 				v.option.ALPN,
+ 				hKeepAlivePeriod,
++				h2ReceiveWindow,
+ 			)
+ 		}
+ 		var makeDownloadTransport func() http.RoundTripper
+@@ -807,6 +814,10 @@ func NewVless(option VlessOption) (*Vless, error) {
+ 			}
+ 
+ 			downloadHKeepAlivePeriod := hKeepAlivePeriod
++			downloadH2ReceiveWindow := lo.FromPtrOr(ds.H2MaxReceiveBufferPerStream, h2ReceiveWindow)
++			if downloadH2ReceiveWindow < 0 || int64(downloadH2ReceiveWindow) > 1<<31-1 {
++				return nil, fmt.Errorf("xhttp download-settings.h2-max-receive-buffer-per-stream must be between 0 and 2147483647 bytes")
++			}
+ 
+ 			downloadCfg := *cfg // make a copy
+ 			downloadCfg.Host = downloadHost
+@@ -904,6 +915,7 @@ func NewVless(option VlessOption) (*Vless, error) {
+ 					},
+ 					downloadALPN,
+ 					downloadHKeepAlivePeriod,
++					downloadH2ReceiveWindow,
+ 				)
+ 			}
+ 		}
+diff --git a/adapter/outbound/vless_xhttp_window_test.go b/adapter/outbound/vless_xhttp_window_test.go
+new file mode 100644
+index 00000000..fd936f66
+--- /dev/null
++++ b/adapter/outbound/vless_xhttp_window_test.go
+@@ -0,0 +1,73 @@
++package outbound
++
++import (
++	"strings"
++	"testing"
++
++	"github.com/metacubex/mihomo/common/structure"
++)
++
++func TestXHTTPReceiveWindowValidation(t *testing.T) {
++	for _, tc := range []struct {
++		name      string
++		up        int
++		down      *int
++		wantError string
++	}{
++		{name: "defaults"},
++		{name: "inherited", up: 8 << 20},
++		{name: "download override", up: 4 << 20, down: windowInt(16 << 20)},
++		{name: "explicit default", up: 8 << 20, down: windowInt(0)},
++		{name: "negative", up: -1, wantError: "xhttp h2-max"},
++		{name: "negative download", down: windowInt(-1), wantError: "download-settings.h2-max"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			_, err := NewVless(VlessOption{
++				Name: "window-test", Server: "192.0.2.1", Port: 443,
++				UUID: "00000000-0000-4000-8000-000000000001", Network: "xhttp",
++				XHTTPOpts: XHTTPOptions{Mode: "stream-up", H2MaxReceiveBufferPerStream: tc.up,
++					DownloadSettings: &XHTTPDownloadSettings{H2MaxReceiveBufferPerStream: tc.down}},
++			})
++			if tc.wantError == "" {
++				if err != nil {
++					t.Fatal(err)
++				}
++			} else if err == nil || !strings.Contains(err.Error(), tc.wantError) {
++				t.Fatalf("error = %v, want %q", err, tc.wantError)
++			}
++		})
++	}
++}
++
++func windowInt(value int) *int { return &value }
++
++func TestXHTTPReceiveWindowDecode(t *testing.T) {
++	decoder := structure.NewDecoder(structure.Option{TagName: "proxy", WeaklyTypedInput: true})
++	for _, tc := range []struct {
++		name string
++		down map[string]any
++		want *int
++	}{
++		{"inherit", map[string]any{}, nil},
++		{"override", map[string]any{"h2-max-receive-buffer-per-stream": 16 << 20}, windowInt(16 << 20)},
++		{"reset", map[string]any{"h2-max-receive-buffer-per-stream": 0}, windowInt(0)},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			var option VlessOption
++			err := decoder.Decode(map[string]any{"name": "window-test", "server": "192.0.2.1", "port": 443,
++				"uuid": "00000000-0000-4000-8000-000000000001", "xhttp-opts": map[string]any{
++					"h2-max-receive-buffer-per-stream": 8 << 20, "download-settings": tc.down,
++				}}, &option)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if option.XHTTPOpts.H2MaxReceiveBufferPerStream != 8<<20 {
++				t.Fatal("main window not decoded")
++			}
++			got := option.XHTTPOpts.DownloadSettings.H2MaxReceiveBufferPerStream
++			if (got == nil) != (tc.want == nil) || got != nil && *got != *tc.want {
++				t.Fatalf("download window = %v, want %v", got, tc.want)
++			}
++		})
++	}
++}
+diff --git a/docs/config.yaml b/docs/config.yaml
+index 7e51bb88..8c4693ee 100644
+--- a/docs/config.yaml
++++ b/docs/config.yaml
+@@ -1042,6 +1042,8 @@ proxies: # socks5
+     xhttp-opts:
+       path: "/"
+       host: xxx.com
++      # h2-max-receive-buffer-per-stream: 0 # Bytes; 0 keeps the HTTP/2 library default. HTTP/2 only.
++      # Larger windows may improve high-bandwidth/high-latency downloads but increase memory use and loaded latency.
+       # mode: "stream-one" # Available: "stream-one", "stream-up" or "packet-up"
+       # headers:
+       #   X-Forwarded-For: ""
+@@ -1071,6 +1073,7 @@ proxies: # socks5
+       #   h-keep-alive-period: 0
+       # download-settings:
+       #   ## xhttp part
++      #   h2-max-receive-buffer-per-stream: 8388608 # 8 MiB; omitted inherits above, explicit 0 restores the library default.
+       #   path: "/"
+       #   host: xxx.com
+       #   headers:
+diff --git a/transport/xhttp/client.go b/transport/xhttp/client.go
+index d34f64ce..af61662e 100644
+--- a/transport/xhttp/client.go
++++ b/transport/xhttp/client.go
+@@ -155,7 +155,7 @@ func (c *PacketUpWriter) Close() error {
+ 	return nil
+ }
+ 
+-func NewTransport(dialRaw DialRawFunc, wrapTLS WrapTLSFunc, dialQUIC DialQUICFunc, alpn []string, keepAlivePeriod time.Duration) http.RoundTripper {
++func NewTransport(dialRaw DialRawFunc, wrapTLS WrapTLSFunc, dialQUIC DialQUICFunc, alpn []string, keepAlivePeriod time.Duration, h2MaxReceiveBufferPerStream int) http.RoundTripper {
+ 	if len(alpn) == 1 && alpn[0] == "h3" { // `alpn: [h3]` means using h3 mode
+ 		if keepAlivePeriod == 0 {
+ 			keepAlivePeriod = QuicgoH3KeepAlivePeriod
+@@ -223,7 +223,8 @@ func NewTransport(dialRaw DialRawFunc, wrapTLS WrapTLSFunc, dialQUIC DialQUICFun
+ 		IdleConnTimeout: ConnIdleTimeout,
+ 		Protocols:       protocols,
+ 		HTTP2: &http.HTTP2Config{
+-			SendPingTimeout: keepAlivePeriod,
++			MaxReceiveBufferPerStream: h2MaxReceiveBufferPerStream,
++			SendPingTimeout:           keepAlivePeriod,
+ 		},
+ 	}
+ }
+diff --git a/transport/xhttp/window_test.go b/transport/xhttp/window_test.go
+new file mode 100644
+index 00000000..ceed1728
+--- /dev/null
++++ b/transport/xhttp/window_test.go
+@@ -0,0 +1,74 @@
++package xhttp
++
++import (
++	"context"
++	"io"
++	"net"
++	"testing"
++	"time"
++
++	"github.com/metacubex/http"
++	"github.com/metacubex/http/http2"
++)
++
++// Read the actual client SETTINGS, rather than just inspecting the Go field:
++// a value silently rejected by the HTTP/2 implementation would fail this test.
++func TestH2ReceiveWindowSettings(t *testing.T) {
++	for _, tc := range []struct {
++		name       string
++		configured int
++		want       uint32
++	}{
++		{"default", 0, 4 << 20},
++		{"8MiB", 8 << 20, 8 << 20},
++		{"16MiB", 16 << 20, 16 << 20},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			client, server := net.Pipe()
++			defer client.Close()
++			defer server.Close()
++			server.SetDeadline(time.Now().Add(5 * time.Second))
++			rt := NewTransport(func(context.Context) (net.Conn, error) { return client, nil },
++				func(_ context.Context, c net.Conn, _ bool) (net.Conn, error) { return c, nil },
++				nil, []string{"h2"}, -1, tc.configured).(*http.Transport)
++			defer rt.CloseIdleConnections()
++			ctx, cancel := context.WithCancel(context.Background())
++			defer cancel()
++			done := make(chan struct{})
++			go func() {
++				defer close(done)
++				req, _ := http.NewRequestWithContext(ctx, "GET", "https://example.test/", nil)
++				resp, _ := rt.RoundTrip(req)
++				if resp != nil {
++					resp.Body.Close()
++				}
++			}()
++			preface := make([]byte, len(http2.ClientPreface))
++			if _, err := io.ReadFull(server, preface); err != nil {
++				t.Fatal(err)
++			}
++			if string(preface) != http2.ClientPreface {
++				t.Fatal("missing HTTP/2 client preface")
++			}
++			frame, err := http2.NewFramer(server, server).ReadFrame()
++			if err != nil {
++				t.Fatal(err)
++			}
++			settings, ok := frame.(*http2.SettingsFrame)
++			if !ok {
++				t.Fatalf("first frame is %T", frame)
++			}
++			got, ok := settings.Value(http2.SettingInitialWindowSize)
++			if !ok || got != tc.want {
++				t.Fatalf("INITIAL_WINDOW_SIZE = %d (present %v), want %d", got, ok, tc.want)
++			}
++			cancel()
++			client.Close()
++			select {
++			case <-done:
++			case <-time.After(5 * time.Second):
++				t.Fatal("request did not stop")
++			}
++		})
++	}
++}

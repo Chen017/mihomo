@@ -1,0 +1,61 @@
+name: Stable upstream + XHTTP window
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Optional official stable tag; empty follows latest stable'
+        required: false
+        default: ''
+  push:
+    branches: [codex/window-builds]
+    paths:
+      - patches/**
+      - scripts/window_release.py
+      - WINDOW-CORE.md
+      - .github/workflows/window-release.yml
+
+concurrency:
+  group: window-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    if: github.repository == 'Chen017/mihomo'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Resolve official stable and apply checked patch
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+        run: python3 scripts/window_release.py prepare --tag "$UPSTREAM_TAG"
+      - uses: actions/setup-go@v6
+        if: steps.prepare.outputs.build_needed == 'true'
+        with:
+          go-version: '1.26.x'
+          cache-dependency-path: .local/source/go.sum
+      - name: Test and build Windows/Linux amd64
+        if: steps.prepare.outputs.build_needed == 'true'
+        run: python3 scripts/window_release.py build
+      - uses: actions/upload-artifact@v4
+        if: steps.prepare.outputs.build_needed == 'true'
+        with:
+          name: ${{ steps.prepare.outputs.version }}
+          path: dist/
+      - name: Publish verified core and source tag
+        if: steps.prepare.outputs.build_needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/window_release.py publish

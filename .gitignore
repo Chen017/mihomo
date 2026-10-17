@@ -26,3 +26,6 @@ test/config/cache*
 /output
 .vscode/
 .fleet/
+/.local/
+/dist/
+__pycache__/
