@@ -39,3 +39,19 @@ func TestURLTestKeepsSuccessfulFirstMeasurement(t *testing.T) {
 		t.Fatalf("delay = %d ms; failed optional request must not inflate the first measurement", delay)
 	}
 }
+
+func TestURLTestReportsPositiveFastResponse(t *testing.T) {
+	previous := UnifiedDelay.Load()
+	UnifiedDelay.Store(false)
+	defer UnifiedDelay.Store(previous)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	delay, err := NewProxy(outbound.NewDirect()).URLTest(ctx, server.URL, nil)
+	if err != nil || delay == 0 {
+		t.Fatalf("successful request: delay=%d err=%v", delay, err)
+	}
+}
