@@ -126,7 +126,9 @@ func getProxyDelay(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	delay, err := proxy.URLTest(ctx, url, expectedStatus)
-	if ctx.Err() != nil {
+	// URLTest may retain a successful first measurement when the optional
+	// unified-delay request exhausts the remaining budget.
+	if ctx.Err() != nil && (err != nil || delay == 0) {
 		render.Status(r, http.StatusGatewayTimeout)
 		render.JSON(w, r, ErrRequestTimeout)
 		return
