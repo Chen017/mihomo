@@ -210,7 +210,7 @@ func (b *BasicOption) NewDialer(opts []dialer.Option) C.Dialer {
 	cDialer := b.DialerForAPI
 	if cDialer == nil {
 		if b.DialerProxy != "" {
-			cDialer = proxydialer.NewByName(b.DialerProxy, b.NewTunnel())
+			cDialer = proxydialer.NewByName(b.DialerProxy, b.NewTunnel(), b.ProviderName)
 		} else {
 			cDialer = dialer.NewDialer(opts...)
 		}

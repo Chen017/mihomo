@@ -394,6 +394,7 @@ func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilt
 		}
 
 		proxies := []C.Proxy{}
+		mappings := []map[string]any{}
 		proxiesSet := map[string]struct{}{}
 		for _, filterReg := range filterRegs {
 		LOOP1:
@@ -453,6 +454,7 @@ func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilt
 
 				proxiesSet[name] = struct{}{}
 				proxies = append(proxies, proxy)
+				mappings = append(mappings, mapping)
 			}
 		}
 
@@ -463,6 +465,12 @@ func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilt
 			return nil, errors.New("file doesn't have any proxy")
 		}
 
+		if err := validateProviderDialers(mappings); err != nil {
+			for _, proxy := range proxies {
+				_ = proxy.Close()
+			}
+			return nil, err
+		}
 		return proxies, nil
 	}, nil
 }
