@@ -147,3 +147,62 @@ func TestValidateDialerProxies(t *testing.T) {
 		})
 	}
 }
+
+func TestInlineProviderDialerUsesNewGlobalNames(t *testing.T) {
+	for _, group := range []bool{false, true} {
+		cfg := RawConfig{ProxyProvider: map[string]map[string]any{"test": {
+			"type": "inline", "payload": []map[string]any{{"name": "entry", "type": "socks5", "server": "127.0.0.1", "port": 1080, "dialer-proxy": "entry"}},
+		}}}
+		if group {
+			cfg.ProxyGroup = []map[string]any{{"name": "entry", "type": "select", "proxies": []string{"DIRECT"}}}
+		} else {
+			cfg.Proxy = []map[string]any{{"name": "entry", "type": "direct"}}
+		}
+		_, providers, err := parseProxies(&cfg)
+		if err != nil {
+			t.Fatalf("global group=%v: %v", group, err)
+		}
+		for _, provider := range providers {
+			if closer, ok := provider.(interface{ Close() error }); ok {
+				closer.Close()
+			}
+		}
+	}
+}
+
+func TestXHTTPDownloadDialerValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		download    string
+		relayDialer string
+		wantError   string
+	}{
+		{name: "self-cycle", download: "entry", wantError: "circular dialer-proxy dependency"},
+		{name: "mixed-cycle", download: "relay", relayDialer: "entry", wantError: "circular dialer-proxy dependency"},
+		{name: "missing", download: "missing", wantError: "xhttp download-settings dialer-proxy [missing] not found"},
+		{name: "empty direct"},
+		{name: "DIRECT", download: "DIRECT"},
+		{name: "named", download: "relay"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := RawConfig{Proxy: []map[string]any{
+				{"name": "entry", "type": "vless", "server": "127.0.0.1", "port": 443,
+					"uuid": "00000000-0000-4000-8000-000000000001", "network": "xhttp", "dialer-proxy": "DIRECT",
+					"xhttp-opts": map[string]any{"mode": "stream-up",
+						"download-settings": map[string]any{"dialer-proxy": tc.download}}},
+				{"name": "relay", "type": "socks5", "server": "127.0.0.1", "port": 1080, "dialer-proxy": tc.relayDialer},
+			}}
+			_, providers, err := parseProxies(&cfg)
+			for _, provider := range providers {
+				if closer, ok := provider.(interface{ Close() error }); ok {
+					_ = closer.Close()
+				}
+			}
+			if tc.wantError == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorContains(t, err, tc.wantError)
+			}
+		})
+	}
+}
