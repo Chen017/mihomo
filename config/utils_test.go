@@ -147,3 +147,25 @@ func TestValidateDialerProxies(t *testing.T) {
 		})
 	}
 }
+
+func TestInlineProviderDialerUsesNewGlobalNames(t *testing.T) {
+	for _, group := range []bool{false, true} {
+		cfg := RawConfig{ProxyProvider: map[string]map[string]any{"test": {
+			"type": "inline", "payload": []map[string]any{{"name": "entry", "type": "socks5", "server": "127.0.0.1", "port": 1080, "dialer-proxy": "entry"}},
+		}}}
+		if group {
+			cfg.ProxyGroup = []map[string]any{{"name": "entry", "type": "select", "proxies": []string{"DIRECT"}}}
+		} else {
+			cfg.Proxy = []map[string]any{{"name": "entry", "type": "direct"}}
+		}
+		_, providers, err := parseProxies(&cfg)
+		if err != nil {
+			t.Fatalf("global group=%v: %v", group, err)
+		}
+		for _, provider := range providers {
+			if closer, ok := provider.(interface{ Close() error }); ok {
+				closer.Close()
+			}
+		}
+	}
+}
