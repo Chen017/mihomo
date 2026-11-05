@@ -54,10 +54,41 @@ index 1a1dd53d..aa268339 100644
  						if err != nil {
  							return nil, err
  						}
+diff --git a/adapter/provider/parser.go b/adapter/provider/parser.go
+index 5d017935..135b6d90 100644
+--- a/adapter/provider/parser.go
++++ b/adapter/provider/parser.go
+@@ -44,7 +44,7 @@ type proxyProviderSchema struct {
+ 	Header      map[string][]string `provider:"header,omitempty"`
+ }
+ 
+-func ParseProxyProvider(name string, mapping map[string]any, tunnel C.Tunnel) (P.ProxyProvider, error) {
++func ParseProxyProvider(name string, mapping map[string]any, tunnel C.Tunnel, globalNames ...map[string]struct{}) (P.ProxyProvider, error) {
+ 	decoder := structure.NewDecoder(structure.Option{TagName: "provider", WeaklyTypedInput: true})
+ 
+ 	schema := &proxyProviderSchema{
+@@ -70,7 +70,7 @@ func ParseProxyProvider(name string, mapping map[string]any, tunnel C.Tunnel) (P
+ 	}
+ 	hc := NewHealthCheck([]C.Proxy{}, schema.HealthCheck.URL, uint(schema.HealthCheck.TestTimeout), hcInterval, schema.HealthCheck.Lazy, expectedStatus)
+ 
+-	parser, err := NewProxiesParser(name, tunnel, schema.Filter, schema.ExcludeFilter, schema.ExcludeType, schema.DialerProxy, schema.Override, schema.AgeSecretKey)
++	parser, err := NewProxiesParser(name, tunnel, schema.Filter, schema.ExcludeFilter, schema.ExcludeType, schema.DialerProxy, schema.Override, schema.AgeSecretKey, globalNames...)
+ 	if err != nil {
+ 		return nil, err
+ 	}
 diff --git a/adapter/provider/provider.go b/adapter/provider/provider.go
-index fa7d56bc..be9fbb64 100644
+index fa7d56bc..c797c7ce 100644
 --- a/adapter/provider/provider.go
 +++ b/adapter/provider/provider.go
+@@ -340,7 +340,7 @@ func (cp *CompatibleProvider) Close() error {
+ 	return cp.compatibleProvider.Close()
+ }
+ 
+-func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilter string, excludeType string, dialerProxy string, override overrideSchema, ageSecretKey string) (resource.Parser[[]C.Proxy], error) {
++func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilter string, excludeType string, dialerProxy string, override overrideSchema, ageSecretKey string, globalNames ...map[string]struct{}) (resource.Parser[[]C.Proxy], error) {
+ 	var excludeTypeArray []string
+ 	if excludeType != "" {
+ 		excludeTypeArray = strings.Split(excludeType, "|")
 @@ -394,6 +394,7 @@ func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilt
  		}
  
@@ -74,11 +105,21 @@ index fa7d56bc..be9fbb64 100644
  			}
  		}
  
-@@ -463,6 +465,12 @@ func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilt
+@@ -463,6 +465,22 @@ func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilt
  			return nil, errors.New("file doesn't have any proxy")
  		}
  
-+		if err := validateProviderDialers(mappings); err != nil {
++		globals := map[string]struct{}{}
++		if len(globalNames) > 0 {
++			globals = globalNames[0]
++		} else if source, ok := tunnel.(interface{ Proxies() map[string]C.Proxy }); ok {
++			for name, proxy := range source.Proxies() {
++				if proxy != nil {
++					globals[name] = struct{}{}
++				}
++			}
++		}
++		if err := validateProviderDialers(mappings, globals); err != nil {
 +			for _, proxy := range proxies {
 +				_ = proxy.Close()
 +			}
@@ -190,6 +231,64 @@ index 74fe644c..c19d34a2 100644
 +	}
 +	return d
  }
+diff --git a/config/config.go b/config/config.go
+index cc8c1016..eb5f465e 100644
+--- a/config/config.go
++++ b/config/config.go
+@@ -931,13 +931,22 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
+ 	}
+ 
+ 	var AllProviders []string
++	// Providers are parsed before the new globals are installed into the tunnel.
++	// Include groups here as well, even though their adapters are created later.
++	globalNames := map[string]struct{}{"GLOBAL": {}}
++	for name := range proxies {
++		globalNames[name] = struct{}{}
++	}
++	for _, name := range proxyList {
++		globalNames[name] = struct{}{}
++	}
+ 	// parse and initial providers
+ 	for name, mapping := range providersConfig {
+ 		if name == provider.ReservedName {
+ 			return nil, nil, fmt.Errorf("can not defined a provider called `%s`", provider.ReservedName)
+ 		}
+ 
+-		pd, err := provider.ParseProxyProvider(name, mapping, T.Tunnel)
++		pd, err := provider.ParseProxyProvider(name, mapping, T.Tunnel, globalNames)
+ 		if err != nil {
+ 			return nil, nil, fmt.Errorf("parse proxy provider %s error: %w", name, err)
+ 		}
+diff --git a/config/utils_test.go b/config/utils_test.go
+index aba0ddc6..ed4e20c3 100644
+--- a/config/utils_test.go
++++ b/config/utils_test.go
+@@ -147,3 +147,25 @@ func TestValidateDialerProxies(t *testing.T) {
+ 		})
+ 	}
+ }
++
++func TestInlineProviderDialerUsesNewGlobalNames(t *testing.T) {
++	for _, group := range []bool{false, true} {
++		cfg := RawConfig{ProxyProvider: map[string]map[string]any{"test": {
++			"type": "inline", "payload": []map[string]any{{"name": "entry", "type": "socks5", "server": "127.0.0.1", "port": 1080, "dialer-proxy": "entry"}},
++		}}}
++		if group {
++			cfg.ProxyGroup = []map[string]any{{"name": "entry", "type": "select", "proxies": []string{"DIRECT"}}}
++		} else {
++			cfg.Proxy = []map[string]any{{"name": "entry", "type": "direct"}}
++		}
++		_, providers, err := parseProxies(&cfg)
++		if err != nil {
++			t.Fatalf("global group=%v: %v", group, err)
++		}
++		for _, provider := range providers {
++			if closer, ok := provider.(interface{ Close() error }); ok {
++				closer.Close()
++			}
++		}
++	}
++}
 diff --git a/transport/vless/encryption/common.go b/transport/vless/encryption/common.go
 index 8a71f719..5019bcdb 100644
 --- a/transport/vless/encryption/common.go
@@ -367,7 +466,7 @@ diff --git a/adapter/provider/dialer_provider.go b/adapter/provider/dialer_provi
 new file mode 100644
 --- /dev/null
 +++ b/adapter/provider/dialer_provider.go
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,54 @@
 +package provider
 +
 +import "fmt"
@@ -375,7 +474,7 @@ new file mode 100644
 +// validateProviderDialers rejects local cycles before publishing a refreshed
 +// provider. XHTTP owns long-lived transport contexts, so a runtime context guard
 +// alone cannot detect a cycle that enters a newly created HTTP transport.
-+func validateProviderDialers(mappings []map[string]any) error {
++func validateProviderDialers(mappings []map[string]any, globals map[string]struct{}) error {
 +	graph := make(map[string][]string, len(mappings))
 +	for _, mapping := range mappings {
 +		name, _ := mapping["name"].(string)
@@ -403,6 +502,9 @@ new file mode 100644
 +		}
 +		state[name] = 1
 +		for _, ref := range graph[name] {
++			if _, global := globals[ref]; global {
++				continue // Match the dialer's global-before-provider lookup order.
++			}
 +			if _, local := graph[ref]; local {
 +				if err := visit(ref); err != nil {
 +					return err
@@ -423,7 +525,7 @@ diff --git a/adapter/provider/dialer_provider_test.go b/adapter/provider/dialer_
 new file mode 100644
 --- /dev/null
 +++ b/adapter/provider/dialer_provider_test.go
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,32 @@
 +package provider
 +
 +import "testing"
@@ -440,10 +542,20 @@ new file mode 100644
 +		{"download cycle", []map[string]any{{"name": "entry", "dialer-proxy": "split"}, {"name": "split", "xhttp-opts": map[string]any{"download-settings": map[string]any{"dialer-proxy": "entry"}}}}, true},
 +	} {
 +		t.Run(tc.name, func(t *testing.T) {
-+			if err := validateProviderDialers(tc.mappings); (err != nil) != tc.bad {
++			if err := validateProviderDialers(tc.mappings, nil); (err != nil) != tc.bad {
 +				t.Fatalf("error=%v want failure=%v", err, tc.bad)
 +			}
 +		})
++	}
++}
++
++func TestGlobalProxyBreaksApparentProviderCycle(t *testing.T) {
++	mappings := []map[string]any{{"name": "entry", "dialer-proxy": "split"}, {"name": "split", "xhttp-opts": map[string]any{"download-settings": map[string]any{"dialer-proxy": "entry"}}}}
++	if err := validateProviderDialers(mappings, map[string]struct{}{"entry": {}}); err != nil {
++		t.Fatal(err)
++	}
++	if err := validateProviderDialers(mappings, map[string]struct{}{"other": {}}); err == nil {
++		t.Fatal("unrelated global hid a provider cycle")
 +	}
 +}
 diff --git a/component/proxydialer/byname_test.go b/component/proxydialer/byname_test.go
