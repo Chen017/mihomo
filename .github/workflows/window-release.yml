@@ -2,7 +2,7 @@ name: Stable upstream + XHTTP transport fixes
 
 on:
   schedule:
-    - cron: '17 3 * * *'
+    - cron: '17 */6 * * *'
   workflow_dispatch:
     inputs:
       upstream_tag:

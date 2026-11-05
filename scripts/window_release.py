@@ -138,6 +138,7 @@ def build():
                 if plan['version'] not in reported:
                     raise RuntimeError('Built core reports the wrong version')
     (DIST / 'provenance.json').write_text(json.dumps(plan, indent=2) + '\n', encoding='utf-8')
+    (DIST / 'version.txt').write_text(plan['version'] + '\n', encoding='utf-8')
     (DIST / 'WINDOW-CORE.md').write_bytes((ROOT / 'WINDOW-CORE.md').read_bytes())
     checksums = ''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n'
                         for p in sorted(DIST.iterdir()) if p.is_file())
