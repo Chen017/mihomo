@@ -1,0 +1,681 @@
+diff --git a/adapter/outbound/base.go b/adapter/outbound/base.go
+index d6942ba0..97a07db3 100644
+--- a/adapter/outbound/base.go
++++ b/adapter/outbound/base.go
+@@ -210,7 +210,7 @@ func (b *BasicOption) NewDialer(opts []dialer.Option) C.Dialer {
+ 	cDialer := b.DialerForAPI
+ 	if cDialer == nil {
+ 		if b.DialerProxy != "" {
+-			cDialer = proxydialer.NewByName(b.DialerProxy, b.NewTunnel())
++			cDialer = proxydialer.NewByName(b.DialerProxy, b.NewTunnel(), b.ProviderName)
+ 		} else {
+ 			cDialer = dialer.NewDialer(opts...)
+ 		}
+diff --git a/adapter/outbound/vless.go b/adapter/outbound/vless.go
+index 1a1dd53d..aa268339 100644
+--- a/adapter/outbound/vless.go
++++ b/adapter/outbound/vless.go
+@@ -129,6 +129,7 @@ type XHTTPReuseSettings struct {
+ }
+ 
+ type XHTTPDownloadSettings struct {
++	DialerProxy *string `proxy:"dialer-proxy,omitempty"`
+ 	// xhttp part
+ 	Path                        *string             `proxy:"path,omitempty"`
+ 	Host                        *string             `proxy:"host,omitempty"`
+@@ -800,6 +801,12 @@ func NewVless(option VlessOption) (*Vless, error) {
+ 			}
+ 
+ 			downloadAddr := net.JoinHostPort(downloadServer, strconv.Itoa(downloadPort))
++			downloadDialer := v.dialer
++			if ds.DialerProxy != nil {
++				downloadOption := v.option.BasicOption
++				downloadOption.DialerProxy = *ds.DialerProxy
++				downloadDialer = downloadOption.NewDialer(v.DialOptions())
++			}
+ 
+ 			downloadHost := lo.FromPtrOr(ds.Host, v.option.XHTTPOpts.Host)
+ 			if downloadHost == "" {
+@@ -840,7 +847,7 @@ func NewVless(option VlessOption) (*Vless, error) {
+ 			makeDownloadTransport = func() http.RoundTripper {
+ 				return xhttp.NewTransport(
+ 					func(ctx context.Context) (net.Conn, error) {
+-						return v.dialer.DialContext(ctx, "tcp", downloadAddr)
++						return downloadDialer.DialContext(ctx, "tcp", downloadAddr)
+ 					},
+ 					func(ctx context.Context, conn net.Conn, isH2 bool) (net.Conn, error) {
+ 						if downloadTLS {
+@@ -907,7 +914,7 @@ func NewVless(option VlessOption) (*Vless, error) {
+ 						if err != nil {
+ 							return nil, err
+ 						}
+-						_, quicConn, err := common.DialQuic(ctx, downloadAddr, v.DialOptions(), v.dialer, tlsConfig, cfg, common.DialQuicOption{Early: true})
++						_, quicConn, err := common.DialQuic(ctx, downloadAddr, v.DialOptions(), downloadDialer, tlsConfig, cfg, common.DialQuicOption{Early: true})
+ 						if err != nil {
+ 							return nil, err
+ 						}
+diff --git a/adapter/provider/provider.go b/adapter/provider/provider.go
+index fa7d56bc..be9fbb64 100644
+--- a/adapter/provider/provider.go
++++ b/adapter/provider/provider.go
+@@ -394,6 +394,7 @@ func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilt
+ 		}
+ 
+ 		proxies := []C.Proxy{}
++		mappings := []map[string]any{}
+ 		proxiesSet := map[string]struct{}{}
+ 		for _, filterReg := range filterRegs {
+ 		LOOP1:
+@@ -453,6 +454,7 @@ func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilt
+ 
+ 				proxiesSet[name] = struct{}{}
+ 				proxies = append(proxies, proxy)
++				mappings = append(mappings, mapping)
+ 			}
+ 		}
+ 
+@@ -463,6 +465,12 @@ func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilt
+ 			return nil, errors.New("file doesn't have any proxy")
+ 		}
+ 
++		if err := validateProviderDialers(mappings); err != nil {
++			for _, proxy := range proxies {
++				_ = proxy.Close()
++			}
++			return nil, err
++		}
+ 		return proxies, nil
+ 	}, nil
+ }
+diff --git a/component/proxydialer/byname.go b/component/proxydialer/byname.go
+index 74fe644c..c19d34a2 100644
+--- a/component/proxydialer/byname.go
++++ b/component/proxydialer/byname.go
+@@ -7,6 +7,7 @@ import (
+ 	"net/netip"
+ 
+ 	C "github.com/metacubex/mihomo/constant"
++	P "github.com/metacubex/mihomo/constant/provider"
+ )
+ 
+ type Tunnel interface {
+@@ -15,36 +16,70 @@ type Tunnel interface {
+ }
+ 
+ type byNameProxyDialer struct {
+-	proxyName string
+-	tunnel    C.Tunnel
++	proxyName    string
++	providerName string
++	tunnel       C.Tunnel
+ }
+ 
+-func (d byNameProxyDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+-	tunnel, _ := d.tunnel.(Tunnel)
+-	if tunnel == nil {
+-		return nil, fmt.Errorf("tunnel is invalid, must be proxydialer.Tunnel, but got: %T", d.tunnel)
+-	}
+-	proxies := tunnel.Proxies()
+-	proxy, ok := proxies[d.proxyName]
++type dialerPathKey struct{}
++type dialerTarget struct{ provider, proxy string }
++
++func (d byNameProxyDialer) resolve(ctx context.Context) (context.Context, C.Proxy, error) {
++	t, ok := d.tunnel.(Tunnel)
+ 	if !ok {
+-		return nil, fmt.Errorf("proxyName[%s] not found", d.proxyName)
++		return ctx, nil, fmt.Errorf("tunnel is invalid, must be proxydialer.Tunnel, but got: %T", d.tunnel)
++	}
++	path, _ := ctx.Value(dialerPathKey{}).([]dialerTarget)
++	target := dialerTarget{d.providerName, d.proxyName}
++	for _, previous := range path {
++		if previous == target {
++			return ctx, nil, fmt.Errorf("dialer-proxy cycle at %s", d.proxyName)
++		}
++	}
++	if len(path) >= 32 {
++		return ctx, nil, fmt.Errorf("dialer-proxy chain exceeds 32 hops")
++	}
++	ctx = context.WithValue(ctx, dialerPathKey{}, append(append([]dialerTarget(nil), path...), target))
++	if proxy := t.Proxies()[d.proxyName]; proxy != nil {
++		return ctx, proxy, nil
++	}
++	if d.providerName != "" {
++		if source, ok := d.tunnel.(interface {
++			Providers() map[string]P.ProxyProvider
++		}); ok {
++			if provider := source.Providers()[d.providerName]; provider != nil {
++				for _, proxy := range provider.Proxies() {
++					if proxy.Name() == d.proxyName {
++						provider.Touch()
++						return ctx, proxy, nil
++					}
++				}
++			}
++		}
++	}
++	return ctx, nil, fmt.Errorf("proxyName[%s] not found in globals or provider[%s]", d.proxyName, d.providerName)
++}
++
++func (d byNameProxyDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
++	ctx, proxy, err := d.resolve(ctx)
++	if err != nil {
++		return nil, err
+ 	}
+ 	return New(proxy, true).DialContext(ctx, network, address)
+ }
+ 
+ func (d byNameProxyDialer) ListenPacket(ctx context.Context, network, address string, rAddrPort netip.AddrPort) (net.PacketConn, error) {
+-	tunnel, _ := d.tunnel.(Tunnel)
+-	if tunnel == nil {
+-		return nil, fmt.Errorf("tunnel is invalid, must be proxydialer.Tunnel, but got: %T", d.tunnel)
+-	}
+-	proxies := tunnel.Proxies()
+-	proxy, ok := proxies[d.proxyName]
+-	if !ok {
+-		return nil, fmt.Errorf("proxyName[%s] not found", d.proxyName)
++	ctx, proxy, err := d.resolve(ctx)
++	if err != nil {
++		return nil, err
+ 	}
+ 	return New(proxy, true).ListenPacket(ctx, network, address, rAddrPort)
+ }
+ 
+-func NewByName(proxyName string, tunnel C.Tunnel) C.Dialer {
+-	return byNameProxyDialer{proxyName: proxyName, tunnel: tunnel}
++func NewByName(proxyName string, tunnel C.Tunnel, providerName ...string) C.Dialer {
++	d := byNameProxyDialer{proxyName: proxyName, tunnel: tunnel}
++	if len(providerName) > 0 {
++		d.providerName = providerName[0]
++	}
++	return d
+ }
+diff --git a/transport/vless/encryption/common.go b/transport/vless/encryption/common.go
+index 8a71f719..5019bcdb 100644
+--- a/transport/vless/encryption/common.go
++++ b/transport/vless/encryption/common.go
+@@ -72,10 +72,22 @@ func (c *CommonConn) Write(b []byte) (int, error) {
+ 	return len(b), nil
+ }
+ 
+-func (c *CommonConn) Read(b []byte) (int, error) {
++func (c *CommonConn) Read(b []byte) (n int, err error) {
+ 	if len(b) == 0 {
+ 		return 0, nil
+ 	}
++	// A restarted server may close before sending its ticket-rejection noise.
++	// Until the first authenticated record, any read failure invalidates only
++	// this session's ticket. Never replay application data automatically.
++	defer func() {
++		if err != nil && c.Client != nil {
++			c.Client.RWLock.Lock()
++			if bytes.HasPrefix(c.UnitedKey, c.Client.PfsKey) {
++				c.Client.Expire = time.Now()
++			}
++			c.Client.RWLock.Unlock()
++		}
++	}()
+ 	if c.PeerAEAD == nil { // client's 0-RTT
+ 		serverRandom := make([]byte, 16)
+ 		if _, err := io.ReadFull(c.Conn, serverRandom); err != nil {
+@@ -105,16 +117,10 @@ func (c *CommonConn) Read(b []byte) (int, error) {
+ 	l, err := DecodeHeader(peerHeader[:]) // l: 17~17000
+ 	if err != nil {
+ 		if c.Client != nil && errors.Is(err, ErrInvalidHeader) { // client's 0-RTT
+-			c.Client.RWLock.Lock()
+-			if bytes.HasPrefix(c.UnitedKey, c.Client.PfsKey) {
+-				c.Client.Expire = time.Now() // expired
+-			}
+-			c.Client.RWLock.Unlock()
+ 			return 0, errors.New("new handshake needed")
+ 		}
+ 		return 0, err
+ 	}
+-	c.Client = nil
+ 	if c.rawInput.Cap() < l {
+ 		c.rawInput.Grow(l) // no need to use sync.Pool, because we are always reading
+ 	}
+@@ -137,6 +143,7 @@ func (c *CommonConn) Read(b []byte) (int, error) {
+ 	if err != nil {
+ 		return 0, err
+ 	}
++	c.Client = nil // A valid header alone does not authenticate a resumed session.
+ 	if len(dst) > len(b) {
+ 		c.input.Reset(dst[copy(b, dst):])
+ 		dst = b // for len(dst)
+diff --git a/adapter/outbound/vless_xhttp_dialer_test.go b/adapter/outbound/vless_xhttp_dialer_test.go
+new file mode 100644
+--- /dev/null
++++ b/adapter/outbound/vless_xhttp_dialer_test.go
+@@ -0,0 +1,115 @@
++package outbound
++
++import (
++	"context"
++	"github.com/metacubex/mihomo/common/structure"
++	C "github.com/metacubex/mihomo/constant"
++	"io"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"strconv"
++	"sync/atomic"
++	"testing"
++	"time"
++)
++
++type countingDialer struct {
++	calls  atomic.Int32
++	target string
++}
++
++func (d *countingDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
++	d.calls.Add(1)
++	return (&net.Dialer{}).DialContext(ctx, network, d.target)
++}
++
++// API dialers always have priority; named proxy tests cover normal user configuration.
++type downloadTestProxy struct {
++	C.Proxy
++	dialer *countingDialer
++}
++
++func (p downloadTestProxy) DialContext(ctx context.Context, m *C.Metadata) (C.Conn, error) {
++	c, e := p.dialer.DialContext(ctx, "tcp", m.RemoteAddress())
++	if e != nil {
++		return nil, e
++	}
++	return NewConn(c, &Base{}), nil
++}
++
++type downloadTestTunnel struct {
++	C.Tunnel
++	proxy C.Proxy
++}
++
++func (t downloadTestTunnel) Proxies() map[string]C.Proxy { return map[string]C.Proxy{"up": t.proxy} }
++
++func TestXHTTPDownloadDialerOverride(t *testing.T) {
++	for _, tc := range []struct {
++		name      string
++		override  *string
++		wantCalls int32
++	}{{"inherit", nil, 2}, {"direct", new(string), 1}} {
++		t.Run(tc.name, func(t *testing.T) {
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				w.WriteHeader(200)
++				if f, ok := w.(http.Flusher); ok {
++					f.Flush()
++				}
++				if r.Method == "GET" {
++					_, _ = w.Write([]byte("download"))
++				} else {
++					_, _ = io.Copy(io.Discard, r.Body)
++				}
++			}))
++			defer server.Close()
++			host, port, _ := net.SplitHostPort(server.Listener.Addr().String())
++			n, _ := strconv.Atoi(port)
++			d := &countingDialer{target: server.Listener.Addr().String()}
++			v, err := NewVless(VlessOption{BasicOption: BasicOption{DialerProxy: "up", TunnelForAPI: downloadTestTunnel{proxy: downloadTestProxy{dialer: d}}}, Name: "split", Server: host, Port: n, UUID: "00000000-0000-4000-8000-000000000001", Network: "xhttp", ALPN: []string{"http/1.1"}, XHTTPOpts: XHTTPOptions{Mode: "stream-up", DownloadSettings: &XHTTPDownloadSettings{DialerProxy: tc.override}}})
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer v.Close()
++			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
++			defer cancel()
++			conn, err := v.xhttpClient.Dial(ctx)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer conn.Close()
++			if _, err = conn.Write([]byte("upload")); err != nil {
++				t.Fatal(err)
++			}
++			buf := make([]byte, 8)
++			if _, err = io.ReadFull(conn, buf); err != nil {
++				t.Fatal(err)
++			}
++			deadline := time.Now().Add(time.Second)
++			for d.calls.Load() < tc.wantCalls && time.Now().Before(deadline) {
++				time.Sleep(time.Millisecond)
++			}
++			if got := d.calls.Load(); got != tc.wantCalls {
++				t.Fatalf("upstream dialer used %d times, want %d", got, tc.wantCalls)
++			}
++		})
++	}
++}
++
++func TestXHTTPDownloadDialerDecode(t *testing.T) {
++	for _, value := range []any{nil, "", "DIRECT", "other"} {
++		fields := map[string]any{}
++		if value != nil {
++			fields["dialer-proxy"] = value
++		}
++		var option VlessOption
++		if err := structure.NewDecoder(structure.Option{TagName: "proxy", WeaklyTypedInput: true}).Decode(map[string]any{"name": "split", "server": "127.0.0.1", "port": 443, "uuid": "00000000-0000-4000-8000-000000000001", "xhttp-opts": map[string]any{"download-settings": fields}}, &option); err != nil {
++			t.Fatal(err)
++		}
++		got := option.XHTTPOpts.DownloadSettings.DialerProxy
++		if value == nil && got != nil || value != nil && (got == nil || *got != value.(string)) {
++			t.Fatalf("decoded %v as %v", value, got)
++		}
++	}
++}
+diff --git a/adapter/provider/dialer_provider.go b/adapter/provider/dialer_provider.go
+new file mode 100644
+--- /dev/null
++++ b/adapter/provider/dialer_provider.go
+@@ -0,0 +1,51 @@
++package provider
++
++import "fmt"
++
++// validateProviderDialers rejects local cycles before publishing a refreshed
++// provider. XHTTP owns long-lived transport contexts, so a runtime context guard
++// alone cannot detect a cycle that enters a newly created HTTP transport.
++func validateProviderDialers(mappings []map[string]any) error {
++	graph := make(map[string][]string, len(mappings))
++	for _, mapping := range mappings {
++		name, _ := mapping["name"].(string)
++		refs := []string{}
++		if ref, _ := mapping["dialer-proxy"].(string); ref != "" {
++			refs = append(refs, ref)
++		}
++		if x, ok := mapping["xhttp-opts"].(map[string]any); ok {
++			if down, ok := x["download-settings"].(map[string]any); ok {
++				if ref, _ := down["dialer-proxy"].(string); ref != "" {
++					refs = append(refs, ref)
++				}
++			}
++		}
++		graph[name] = refs
++	}
++	state := make(map[string]uint8, len(graph))
++	var visit func(string) error
++	visit = func(name string) error {
++		if state[name] == 1 {
++			return fmt.Errorf("provider proxy [%s] has circular dialer-proxy dependency", name)
++		}
++		if state[name] == 2 {
++			return nil
++		}
++		state[name] = 1
++		for _, ref := range graph[name] {
++			if _, local := graph[ref]; local {
++				if err := visit(ref); err != nil {
++					return err
++				}
++			}
++		}
++		state[name] = 2
++		return nil
++	}
++	for name := range graph {
++		if err := visit(name); err != nil {
++			return err
++		}
++	}
++	return nil
++}
+diff --git a/adapter/provider/dialer_provider_test.go b/adapter/provider/dialer_provider_test.go
+new file mode 100644
+--- /dev/null
++++ b/adapter/provider/dialer_provider_test.go
+@@ -0,0 +1,22 @@
++package provider
++
++import "testing"
++
++func TestProviderDialerCycles(t *testing.T) {
++	for _, tc := range []struct {
++		name     string
++		mappings []map[string]any
++		bad      bool
++	}{
++		{"same provider", []map[string]any{{"name": "entry"}, {"name": "split", "dialer-proxy": "entry", "xhttp-opts": map[string]any{"download-settings": map[string]any{"dialer-proxy": ""}}}}, false},
++		{"external group", []map[string]any{{"name": "entry", "dialer-proxy": "external"}}, false},
++		{"self", []map[string]any{{"name": "entry", "dialer-proxy": "entry"}}, true},
++		{"download cycle", []map[string]any{{"name": "entry", "dialer-proxy": "split"}, {"name": "split", "xhttp-opts": map[string]any{"download-settings": map[string]any{"dialer-proxy": "entry"}}}}, true},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			if err := validateProviderDialers(tc.mappings); (err != nil) != tc.bad {
++				t.Fatalf("error=%v want failure=%v", err, tc.bad)
++			}
++		})
++	}
++}
+diff --git a/component/proxydialer/byname_test.go b/component/proxydialer/byname_test.go
+new file mode 100644
+--- /dev/null
++++ b/component/proxydialer/byname_test.go
+@@ -0,0 +1,67 @@
++package proxydialer
++
++import (
++	"context"
++	C "github.com/metacubex/mihomo/constant"
++	P "github.com/metacubex/mihomo/constant/provider"
++	"testing"
++)
++
++type testTunnel struct {
++	C.Tunnel
++	globals   map[string]C.Proxy
++	providers map[string]P.ProxyProvider
++}
++
++func (t testTunnel) Proxies() map[string]C.Proxy           { return t.globals }
++func (t testTunnel) Providers() map[string]P.ProxyProvider { return t.providers }
++
++type testProxy struct {
++	C.Proxy
++	name string
++}
++
++func (p *testProxy) Name() string { return p.name }
++
++type testProvider struct {
++	P.ProxyProvider
++	proxies []C.Proxy
++	touched int
++}
++
++func (p *testProvider) Proxies() []C.Proxy { return p.proxies }
++func (p *testProvider) Touch()             { p.touched++ }
++
++func TestProviderDialerScopeRefreshAndCycles(t *testing.T) {
++	first := &testProxy{name: "entry"}
++	second := &testProxy{name: "entry"}
++	foreign := &testProxy{name: "foreign"}
++	provider := &testProvider{proxies: []C.Proxy{first}}
++	tunnel := testTunnel{globals: map[string]C.Proxy{}, providers: map[string]P.ProxyProvider{"mine": provider, "other": &testProvider{proxies: []C.Proxy{foreign}}}}
++	d := byNameProxyDialer{proxyName: "entry", providerName: "mine", tunnel: tunnel}
++	ctx, p, err := d.resolve(context.Background())
++	if err != nil || p != first {
++		t.Fatalf("resolve = %v, %v", p, err)
++	}
++	if _, _, err = d.resolve(ctx); err == nil {
++		t.Fatal("cycle accepted")
++	}
++	provider.proxies = []C.Proxy{second}
++	if _, p, err = d.resolve(context.Background()); err != nil || p != second {
++		t.Fatal("provider refresh retained stale proxy")
++	}
++	d.proxyName = "foreign"
++	if _, _, err = d.resolve(context.Background()); err == nil {
++		t.Fatal("another provider was searched")
++	}
++	d.proxyName = "entry"
++	d.providerName = ""
++	if _, _, err = d.resolve(context.Background()); err == nil {
++		t.Fatal("global dialer searched arbitrary providers")
++	}
++	tunnel.globals["entry"] = first
++	d.tunnel = tunnel
++	if _, p, err = d.resolve(context.Background()); err != nil || p != first {
++		t.Fatal("global reference failed")
++	}
++}
+diff --git a/transport/vless/encryption/ticket_test.go b/transport/vless/encryption/ticket_test.go
+new file mode 100644
+--- /dev/null
++++ b/transport/vless/encryption/ticket_test.go
+@@ -0,0 +1,156 @@
++package encryption
++
++import (
++	"bytes"
++	"crypto/ecdh"
++	"crypto/rand"
++	"io"
++	"net"
++	"testing"
++	"time"
++)
++
++func ticketTestConn(t *testing.T, wire, currentKey []byte) (*CommonConn, *ClientInstance) {
++	t.Helper()
++	a, b := net.Pipe()
++	t.Cleanup(func() { a.Close() })
++	a.SetDeadline(time.Now().Add(5 * time.Second))
++	go func() { defer b.Close(); b.Write(wire) }()
++	pfs := bytes.Repeat([]byte{1}, 64)
++	i := &ClientInstance{PfsKey: currentKey, Expire: time.Now().Add(time.Hour)}
++	c := NewCommonConn(a, true)
++	c.Client = i
++	c.UnitedKey = append(pfs, bytes.Repeat([]byte{2}, 32)...)
++	return c, i
++}
++
++func TestResumedTicketExpiresBeforeAuthenticatedResponse(t *testing.T) {
++	header := make([]byte, 5)
++	EncodeHeader(header, 17)
++	for name, wire := range map[string][]byte{
++		"early EOF":              nil,
++		"short random":           make([]byte, 7),
++		"invalid header":         make([]byte, 21),
++		"short record":           append(make([]byte, 16), header...),
++		"unauthenticated record": append(append(make([]byte, 16), header...), make([]byte, 17)...),
++	} {
++		t.Run(name, func(t *testing.T) {
++			c, i := ticketTestConn(t, wire, bytes.Repeat([]byte{1}, 64))
++			if _, err := c.Read(make([]byte, 32)); err == nil {
++				t.Fatal("expected rejected session")
++			}
++			if time.Now().Before(i.Expire) {
++				t.Fatal("failed 0-RTT ticket remained cached")
++			}
++		})
++	}
++}
++
++func TestOldFailureDoesNotExpireNewTicket(t *testing.T) {
++	c, i := ticketTestConn(t, nil, bytes.Repeat([]byte{3}, 64))
++	c.Read(make([]byte, 32))
++	if !time.Now().Before(i.Expire) {
++		t.Fatal("old connection expired a newer ticket")
++	}
++}
++
++func TestAuthenticatedResumptionKeepsTicketAfterClose(t *testing.T) {
++	random := bytes.Repeat([]byte{4}, 16)
++	key := append(bytes.Repeat([]byte{1}, 64), bytes.Repeat([]byte{2}, 32)...)
++	header := make([]byte, 5)
++	EncodeHeader(header, 18)
++	wire := append(append([]byte{}, random...), NewAEAD(random, key, true).Seal(header, nil, []byte("ok"), header)...)
++	c, i := ticketTestConn(t, wire, bytes.Repeat([]byte{1}, 64))
++	data := make([]byte, 32)
++	if n, err := c.Read(data); err != nil || string(data[:n]) != "ok" {
++		t.Fatalf("response: %q %v", data[:n], err)
++	}
++	if _, err := c.Read(data); err != io.EOF {
++		t.Fatalf("close: %v", err)
++	}
++	if !time.Now().Before(i.Expire) {
++		t.Fatal("normal stream close expired a valid ticket")
++	}
++}
++
++func TestZeroRTTResumptionAndServerRestart(t *testing.T) {
++	key, err := ecdh.X25519().GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	server := &ServerInstance{}
++	if err := server.Init([][]byte{key.Bytes()}, 2, 600, 0, "100-35-35"); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { server.Close() })
++	client := &ClientInstance{}
++	if err := client.Init([][]byte{key.PublicKey().Bytes()}, 2, 1, "100-35-35"); err != nil {
++		t.Fatal(err)
++	}
++	exchange := func(wantZero, rejected bool) {
++		t.Helper()
++		listener, err := net.Listen("tcp", "127.0.0.1:0")
++		if err != nil {
++			t.Fatal(err)
++		}
++		defer listener.Close()
++		a, err := net.Dial("tcp", listener.Addr().String())
++		if err != nil {
++			t.Fatal(err)
++		}
++		b, err := listener.Accept()
++		if err != nil {
++			a.Close()
++			t.Fatal(err)
++		}
++		defer a.Close()
++		a.SetDeadline(time.Now().Add(5 * time.Second))
++		b.SetDeadline(time.Now().Add(5 * time.Second))
++		result := make(chan error, 1)
++		go func() {
++			defer b.Close()
++			c, err := server.Handshake(b, nil)
++			if err == nil {
++				var data [4]byte
++				_, err = io.ReadFull(c, data[:])
++				if err == nil && string(data[:]) != "ping" {
++					err = io.ErrUnexpectedEOF
++				}
++				if err == nil {
++					_, err = c.Write([]byte("pong"))
++				}
++			}
++			result <- err
++		}()
++		c, err := client.Handshake(a)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if (len(c.PreWrite) > 0) != wantZero {
++			t.Fatalf("0-RTT=%v, wanted %v", len(c.PreWrite) > 0, wantZero)
++		}
++		written := make(chan error, 1)
++		go func() { _, err := c.Write([]byte("ping")); written <- err }()
++		var response [4]byte
++		_, err = io.ReadFull(c, response[:])
++		a.Close()
++		writeErr, serverErr := <-written, <-result
++		if rejected {
++			if err == nil || serverErr == nil {
++				t.Fatal("expired ticket was accepted")
++			}
++			return
++		}
++		if err != nil || writeErr != nil || serverErr != nil || string(response[:]) != "pong" {
++			t.Fatalf("round trip: %q %v %v %v", response, err, writeErr, serverErr)
++		}
++	}
++	exchange(false, false) // First connection obtains a ticket.
++	exchange(true, false)  // Subsequent connection actually takes the zero-RTT path.
++	server.RWLock.Lock()
++	server.Sessions = make(map[[16]byte]*ServerSession) // Equivalent to losing sessions on restart.
++	server.RWLock.Unlock()
++	exchange(true, true)
++	exchange(false, false) // Reacquire once; the client and its config stay unchanged.
++	exchange(true, false)
++}

@@ -1,4 +1,4 @@
-name: Stable upstream + XHTTP window
+name: Stable upstream + XHTTP transport fixes
 
 on:
   schedule:

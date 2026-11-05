@@ -2,6 +2,24 @@
 
 基于 [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) 最新**正式版**，增加可选窗口参数，并修复 unified-delay 已成功首轮测量的回退处理。窗口官方 PR：[3331](https://github.com/MetaCubeX/mihomo/pull/3331)。这是非官方构建；不填窗口参数时窗口行为保持上游默认。Xray 核心继续使用 26.3.27。
 
+## NAT IPv4 与线路 IPv6 分路
+
+增加 `xhttp-opts.download-settings.dialer-proxy`：不填继承主连接的前置代理；空字符串或 `DIRECT` 表示下载直连；其他名称选择下载专用前置代理。例如 NAT IPv4 上传、线路机 IPv6 下载：
+
+```yaml
+dialer-proxy: NAT-v4-Entry
+xhttp-opts:
+  download-settings:
+    dialer-proxy: ''
+    # 继续保留原有 IPv6 地址、端口、REALITY 和 XHTTP 字段
+```
+
+Provider 中的前置代理可引用同一 Provider 的节点；全局代理仍优先，不搜索其他 Provider 的同名节点。Provider 刷新后重新查找目标，发现内部循环引用时拒绝载入。
+
+公开 VLESS Encryption 入口继续使用 `random.0rtt`。首次连接获取票据，后续连接复用票据；服务端重启会丢失票据，旧票据请求可能失败一次，下一次连接重新握手后继续零 RTT。修复了提前断开或认证失败后没有清理旧票据的情况，也避免旧连接失败清掉并发取得的新票据。不会自动重放已发送的应用数据。
+
+这类 NAT 分路同时需要 Panel v1.3.11 / Script v2.7.16 生成的新配置：公开入口不带 Vision flow，入口客户端关闭 TFO。原有线路至落地的 Vision 互联保留；此项需要更新相关服务端配置。仅使用接收窗口功能时不需要更新服务器。
+
 ## 下载与更新
 
 - [下载最新构建](https://github.com/Chen017/mihomo/releases/latest)：Windows 64 位选 `mihomo-windows-amd64-…zip`，解压得到 `mihomo.exe`。Linux amd64 提供 gzip。
@@ -58,11 +76,11 @@ HTTP/2 接收窗口类似“已发出但还没补充接收额度的数据量”�
 6. 重启后核对**实际运行核心**版本，再在需要的 XHTTP 节点加上上面的 8 MiB 字段，重新加载配置。版本没变前不要用测速判断功能是否生效。
 7. 回退：删除新字段或设为 0，再按相同步骤恢复备份的官方核心；服务模式也需同步恢复批准的副本。使用官方“更新内核”可重新获取官方版，但会失去本选项。
 
-以上步骤只需处理本机 Mihomo；不需要更新或重装服务器 Xray。若不想更换核心，可以继续官方版等待 PR，当前连接仍可正常使用。
+上述窗口功能只需处理本机 Mihomo，不需要更新或重装服务器 Xray。NAT 分路功能请同时按前面的服务端版本要求升级与部署。
 
 ## 构建实现
 
-GitHub Actions 只需自身的 `GITHUB_TOKEN`（contents: write），不需要个人访问令牌。采用 Go 1.26.x、`with_gvisor`、CGO=0、amd64 v1。测试覆盖实际 H2 SETTINGS、配置解码、默认值和下载覆盖。
+GitHub Actions 只需自身的 `GITHUB_TOKEN`（contents: write），不需要个人访问令牌。采用 Go 1.26.x、`with_gvisor`、CGO=0、amd64 v1。测试覆盖实际 H2 SETTINGS、下载拨号继承与覆盖、Provider 查找与循环、零 RTT 复用和票据失效恢复。
 
 手动使用全新 clone 时可运行：
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the latest stable upstream plus a checked, opt-in XHTTP patch."""
+"""Build the latest stable upstream plus checked XHTTP, provider-dialer and 0-RTT fixes."""
 import argparse
 import datetime
 import gzip
@@ -97,7 +97,8 @@ def build():
         return
     env = dict(os.environ, CGO_ENABLED='0', GOTOOLCHAIN='local', GOFLAGS='-mod=readonly')
     run('go', 'test', '-tags', 'with_gvisor', './transport/xhttp', './adapter/outbound',
-        './adapter', './hub/route', '-count=1', cwd=SOURCE, env=env)
+        './adapter', './hub/route', './adapter/provider', './component/proxydialer',
+        './transport/vless/encryption', '-count=1', cwd=SOURCE, env=env)
     run('git', 'add', '--', *plan['modified_paths'], cwd=SOURCE)
     changed = subprocess.run(['git', 'diff', '--cached', '--quiet'], cwd=SOURCE).returncode
     if changed not in (0, 1):
@@ -152,14 +153,14 @@ def publish():
     run('git', 'tag', version, plan['source_commit'])
     run('git', '-c', 'credential.helper=', '-c', 'credential.helper=!gh auth git-credential',
         'push', 'origin', f'refs/tags/{version}')
-    notes = (f'Unofficial build of {UPSTREAM} {plan["upstream_tag"]}: configurable XHTTP H2 window and a unified-delay fallback fix. '
+    notes = (f'Unofficial build of {UPSTREAM} {plan["upstream_tag"]}: configurable XHTTP H2 window, independent download dialers, scoped provider chaining, 0-RTT ticket recovery and unified-delay fallback fixes. '
              'Window defaults are unchanged; no extra retries or timeout extensions. See WINDOW-CORE.md for setup and rollback.\n\n'
              f'Upstream: `{plan["upstream_commit"]}`\nPatch SHA256: `{plan["patch_sha256"]}`\n'
              f'Source: `{plan["source_commit"]}`\nCompiler: `{plan["go_version"]}`\n')
     notes_file = WORK / 'release-notes.md'
     notes_file.write_text(notes, encoding='utf-8')
     run('gh', 'release', 'create', version, '--repo', FORK, '--target', plan['source_commit'],
-        '--title', f'{plan["upstream_tag"]} + XHTTP window and delay fixes', '--latest',
+        '--title', f'{plan["upstream_tag"]} + XHTTP NAT split and transport fixes', '--latest',
         '--notes-file', str(notes_file), *[str(p) for p in sorted(DIST.iterdir())])
 
 
