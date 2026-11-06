@@ -1,5 +1,7 @@
 # 可配置 XHTTP H2 接收窗口的个人构建
 
+完整的跨仓库需求、补丁归属和升级约束见 [个人定制说明](CUSTOMIZATIONS.md)。
+
 基于 [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) 最新**正式版**，增加可选窗口参数，并修复 unified-delay 已成功首轮测量的回退处理。窗口官方 PR：[3331](https://github.com/MetaCubeX/mihomo/pull/3331)。这是非官方构建；不填窗口参数时窗口行为保持上游默认。Xray 核心继续使用 26.3.27。
 
 ## NAT IPv4 与线路 IPv6 分路
@@ -23,9 +25,9 @@ Provider 中的前置代理可引用同一 Provider 的节点；全局代理仍�
 ## 下载与更新
 
 - [下载最新构建](https://github.com/Chen017/mihomo/releases/latest)：Windows 64 位选 `mihomo-windows-amd64-…zip`，解压得到 `mihomo.exe`。Linux amd64 提供 gzip。
-- [构建状态](https://github.com/Chen017/mihomo/actions/workflows/window-release.yml)：每天 11:17（Asia/Singapore）检查上游最新正式版，也可点 **Run workflow**。上游更新后自动取源码、检查并应用补丁、测试、编译、发布。
+- [构建状态](https://github.com/Chen017/mihomo/actions/workflows/window-release.yml)：每六小时检查上游最新正式版（Asia/Singapore 02:17、08:17、14:17、20:17），也可点 **Run workflow**。上游更新后自动取源码、检查并应用补丁、测试、编译、发布。
 - 相同上游提交和补丁已发布时跳过。依次检查每个补丁及已验证的兼容版本；上游已包含的修改不重复注入，兼容的上下文变化可通过干净的三方合并处理；冲突或测试失败时停止发布，上一版 Release 保留。
-- 定时任务不自动替换电脑里的核心。每次更新从本 Fork 下载；Clash Verge 自带的“更新内核”会下载官方版，可能覆盖个人构建。
+- 定时任务不直接替换电脑里的核心。定制 Clash Verge 会自动检测本 Fork 的新内核并发布包含它的新安装包，之后可在应用内更新；定制版内核更新入口也指向本 Fork。官方 Clash Verge 的内核更新仍会下载官方版，手动替换内核的用户需注意这一差别。
 - 每版附 `checksums.txt`、`provenance.json`，记录上游提交、补丁 SHA256、源码提交和编译器。源代码标签对应实际打补丁后的代码，不是仅标记旧维护分支。
 - GitHub 可能延迟定时任务；公开仓库长期无活动时可能停用 schedule，此时在 Actions 重新启用即可。
 
@@ -67,6 +69,10 @@ HTTP/2 接收窗口类似“已发出但还没补充接收额度的数据量”�
 粗略量级为 `窗口大小 ÷ 有效反馈周期`。例如 4 MiB 和约 80 ms 对应约 419 Mbps；8 MiB 对应约 839 Mbps。这只是帮助理解的估算，反馈时机、并发流、TCP 拥塞和链路都会影响实际结果。更大窗口可能提高吞吐，也可能增加缓冲内存和满载排队延迟。
 
 ## Windows / Clash Verge Rev 更换与回退
+
+优先使用 [Clash Verge Personal 安装包](https://github.com/Chen017/clash-verge-rev/releases/latest)：先备份配置、退出原应用，再覆盖安装到原目录。无需继续手动替换 Alpha 内核，后续走应用内更新。
+
+以下步骤仅供继续使用官方应用、手动替换核心的用户参考。
 
 1. 下载 Windows zip，并用 `checksums.txt` 核对下载文件的 SHA256；解压后执行 `mihomo.exe -v`，版本应包含 `-window.`。
 2. 在 Clash Verge 备份原配置。在任务管理器找到图形客户端 `Clash Verge.exe`，选择“打开文件所在的位置”；它旁边的 `verge-mihomo.exe` 是客户端管理的稳定版核心。服务模式实际运行的核心可能在另一个目录，不要直接修改服务内部副本。

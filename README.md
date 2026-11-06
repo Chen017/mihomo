@@ -1,4 +1,4 @@
-> Personal fork: [configurable XHTTP H2 window, downloads and setup](WINDOW-CORE.md). Window defaults are unchanged unless explicitly configured.
+> **Chen017 定制 Fork**：[个人定制需求与维护约定](CUSTOMIZATIONS.md) · [XHTTP H2 窗口、配置与下载](WINDOW-CORE.md)。包含窗口、上下行分路、Provider 引用和零 RTT 恢复补丁；未配置窗口时沿用上游默认。
 
 <h1 align="center">
   <img src="Meta.png" alt="Meta Kennel" width="200">
