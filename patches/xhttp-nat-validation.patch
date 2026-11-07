@@ -1,0 +1,167 @@
+diff --git a/adapter/outbound/vless.go b/adapter/outbound/vless.go
+index aa268339f203b6a72d1bd35d53ffd2a136e6361a..c4dc40f2f68f507c95244cffa772a4665226b00d 100644
+--- a/adapter/outbound/vless.go
++++ b/adapter/outbound/vless.go
+@@ -415,6 +415,9 @@ func (v *Vless) SupportUOT() bool {
+ func (v *Vless) ProxyInfo() C.ProxyInfo {
+ 	info := v.Base.ProxyInfo()
+ 	info.DialerProxy = v.option.DialerProxy
++	if ds := v.option.XHTTPOpts.DownloadSettings; v.option.Network == "xhttp" && ds != nil && ds.DialerProxy != nil {
++		info.XHTTPDownloadDialerProxy = *ds.DialerProxy
++	}
+ 	return info
+ }
+ 
+diff --git a/config/utils.go b/config/utils.go
+index ed4605146cc8d5b3d6dc96d5e9b786cd68389fa2..4daccce68ce1d5d83241ce734249162903cf3cfd 100644
+--- a/config/utils.go
++++ b/config/utils.go
+@@ -146,39 +146,53 @@ func proxyGroupsDagSort(groupsConfig []map[string]any) error {
+ 
+ // validateDialerProxies checks if all dialer-proxy references are valid
+ func validateDialerProxies(proxies map[string]C.Proxy) error {
+-	graph := make(map[string]string) // proxy name -> dialer-proxy name
++	graph := make(map[string][]string) // proxy name -> upload and download dialers
+ 
+-	// collect all proxies with dialer-proxy configured
+ 	for name, proxy := range proxies {
+-		dialerProxy := proxy.ProxyInfo().DialerProxy
+-		if dialerProxy != "" {
+-			// validate each dialer-proxy reference
+-			_, exist := proxies[dialerProxy]
+-			if !exist {
++		info := proxy.ProxyInfo()
++		if dialerProxy := info.DialerProxy; dialerProxy != "" {
++			if _, exist := proxies[dialerProxy]; !exist {
+ 				return fmt.Errorf("proxy [%s] dialer-proxy [%s] not found", name, dialerProxy)
+ 			}
+-
+-			// build dependency graph
+-			graph[name] = dialerProxy
++			graph[name] = append(graph[name], dialerProxy)
++		}
++		if dialerProxy := info.XHTTPDownloadDialerProxy; dialerProxy != "" && dialerProxy != info.DialerProxy {
++			if _, exist := proxies[dialerProxy]; !exist {
++				return fmt.Errorf("proxy [%s] xhttp download-settings dialer-proxy [%s] not found", name, dialerProxy)
++			}
++			graph[name] = append(graph[name], dialerProxy)
+ 		}
+ 	}
+ 
+-	// every proxy has at most one dialer-proxy, so walk each chain once: reaching a proxy
+-	// of the current walk means a cycle, reaching one an earlier walk finished does not
++	// XHTTP transports can start a new request context, so reject a static cycle
++	// in either direction here, before the context-based dial guard is needed.
+ 	const onPath, acyclic = 1, 2
+ 	state := make(map[string]uint8, len(graph))
+-	var path []string
++	type visit struct {
++		name    string
++		leaving bool
++	}
++	var stack []visit
+ 	for name := range graph {
+-		path = path[:0]
+-		for current, ok := name, true; ok && state[current] != acyclic; current, ok = graph[current] {
+-			if state[current] == onPath {
+-				return fmt.Errorf("proxy [%s] has circular dialer-proxy dependency", name)
++		stack = append(stack, visit{name: name})
++		for len(stack) > 0 {
++			step := stack[len(stack)-1]
++			stack = stack[:len(stack)-1]
++			if step.leaving {
++				state[step.name] = acyclic
++				continue
++			}
++			switch state[step.name] {
++			case acyclic:
++				continue
++			case onPath:
++				return fmt.Errorf("proxy [%s] has circular dialer-proxy dependency", step.name)
++			}
++			state[step.name] = onPath
++			stack = append(stack, visit{name: step.name, leaving: true})
++			for _, dialer := range graph[step.name] {
++				stack = append(stack, visit{name: dialer})
+ 			}
+-			state[current] = onPath
+-			path = append(path, current)
+-		}
+-		for _, p := range path {
+-			state[p] = acyclic
+ 		}
+ 	}
+ 
+diff --git a/config/utils_test.go b/config/utils_test.go
+index ed4e20c3d58714a1b8e06fc90a3117c9cd42fcde..8e4dafd1e2779b0c309e12672abaad3f2794a2be 100644
+--- a/config/utils_test.go
++++ b/config/utils_test.go
+@@ -169,3 +169,40 @@ func TestInlineProviderDialerUsesNewGlobalNames(t *testing.T) {
+ 		}
+ 	}
+ }
++
++func TestXHTTPDownloadDialerValidation(t *testing.T) {
++	for _, tc := range []struct {
++		name        string
++		download    string
++		relayDialer string
++		wantError   string
++	}{
++		{name: "self-cycle", download: "entry", wantError: "circular dialer-proxy dependency"},
++		{name: "mixed-cycle", download: "relay", relayDialer: "entry", wantError: "circular dialer-proxy dependency"},
++		{name: "missing", download: "missing", wantError: "xhttp download-settings dialer-proxy [missing] not found"},
++		{name: "empty direct"},
++		{name: "DIRECT", download: "DIRECT"},
++		{name: "named", download: "relay"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			cfg := RawConfig{Proxy: []map[string]any{
++				{"name": "entry", "type": "vless", "server": "127.0.0.1", "port": 443,
++					"uuid": "00000000-0000-4000-8000-000000000001", "network": "xhttp", "dialer-proxy": "DIRECT",
++					"xhttp-opts": map[string]any{"mode": "stream-up",
++						"download-settings": map[string]any{"dialer-proxy": tc.download}}},
++				{"name": "relay", "type": "socks5", "server": "127.0.0.1", "port": 1080, "dialer-proxy": tc.relayDialer},
++			}}
++			_, providers, err := parseProxies(&cfg)
++			for _, provider := range providers {
++				if closer, ok := provider.(interface{ Close() error }); ok {
++					_ = closer.Close()
++				}
++			}
++			if tc.wantError == "" {
++				assert.NoError(t, err)
++			} else {
++				assert.ErrorContains(t, err, tc.wantError)
++			}
++		})
++	}
++}
+diff --git a/constant/adapters.go b/constant/adapters.go
+index 9b0b70ce4948bded42b902b471039b9c643ff522..1b21e1ed2c9d692d5ee7c9077e3f295713afd419 100644
+--- a/constant/adapters.go
++++ b/constant/adapters.go
+@@ -113,14 +113,15 @@ type Dialer interface {
+ }
+ 
+ type ProxyInfo struct {
+-	XUDP         bool
+-	TFO          bool
+-	MPTCP        bool
+-	SMUX         bool
+-	Interface    string
+-	RoutingMark  int
+-	ProviderName string
+-	DialerProxy  string
++	XUDP                     bool
++	TFO                      bool
++	MPTCP                    bool
++	SMUX                     bool
++	Interface                string
++	RoutingMark              int
++	ProviderName             string
++	DialerProxy              string
++	XHTTPDownloadDialerProxy string
+ }
+ 
+ type ProxyAdapter interface {

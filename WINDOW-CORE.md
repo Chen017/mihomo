@@ -18,6 +18,8 @@ xhttp-opts:
 
 Provider 中的前置代理可引用同一 Provider 的节点；全局代理仍优先，不搜索其他 Provider 的同名节点。Provider 刷新后重新查找目标，发现内部循环引用时拒绝载入。循环检查也尊重全局同名节点 / 策略组优先规则；冷启动时使用本次配置的名称集合，避免误用尚未切换的旧运行配置。
 
+顶层 `proxies` 会在加载时检查命名的上传和下载前置代理。XHTTP 传输可创建独立请求上下文，拨号时的循环检测无法覆盖所有静态引用，因此加载时拒绝自引用、混合上下行循环和不存在的下载前置代理。显式直连和已有的命名分路可正常加载。回归由 `config` 包的 `TestXHTTPDownloadDialerValidation` 覆盖。
+
 公开 VLESS Encryption 入口继续使用 `random.0rtt`。首次连接获取票据，后续连接复用票据；服务端重启会丢失票据，旧票据请求可能失败一次，下一次连接重新握手后继续零 RTT。修复了提前断开或认证失败后没有清理旧票据的情况，也避免旧连接失败清掉并发取得的新票据。不会自动重放已发送的应用数据。
 
 这类 NAT 分路同时需要 Panel v1.3.11 / Script v2.7.16 生成的新配置：公开入口不带 Vision flow，入口客户端关闭 TFO。原有线路至落地的 Vision 互联保留；此项需要更新相关服务端配置。仅使用接收窗口功能时不需要更新服务器。
@@ -84,15 +86,22 @@ HTTP/2 接收窗口类似“已发出但还没补充接收额度的数据量”�
 
 上述窗口功能只需处理本机 Mihomo，不需要更新或重装服务器 Xray。NAT 分路功能请同时按前面的服务端版本要求升级与部署。
 
-## 构建实现
+## 开发、验证和发布
 
-GitHub Actions 只需自身的 `GITHUB_TOKEN`（contents: write），不需要个人访问令牌。采用 Go 1.26.x、`with_gvisor`、CGO=0、amd64 v1。测试覆盖实际 H2 SETTINGS、下载拨号继承与覆盖、Provider 查找与循环、零 RTT 复用和票据失效恢复。
+`codex/window-builds` 维护 `patches/`、`scripts/window_release.py` 和 `.github/workflows/window-release.yml`。修改定制 Go 行为时更新对应补丁及其回归测试。`patches/compat/` 保存经过验证的上下文变体。维护分支的 Go 文件供对照，真正编译的是从上游正式版创建并应用补丁的 `.local/source`。
 
-手动使用全新 clone 时可运行：
+安装 Git、已登录的 GitHub CLI、Python 3.11+ 和 Go 1.26.x。在全新 clone 根目录运行以下命令。Go 回归需允许本机回环连接。
 
 ```text
-python scripts/window_release.py prepare
+python -m unittest discover -s scripts -p "test_*.py"
+python scripts/window_release.py prepare --verify
 python scripts/window_release.py build
 ```
 
-`prepare --tag vX.Y.Z` 可固定某个官方正式版。`publish` 仅供已授权的 Fork 发布流程使用。`.local/source` 保留失败现场；已有目录时脚本停止，不删除或重置本地修改。
+`prepare --verify --tag vX.Y.Z` 可固定某个官方正式版。`--verify` 即使已有同版本 Release 也会应用补丁，且生成的计划禁止 `publish`。Python 测试使用临时目录和模拟 GitHub 调用，无需联网。Go 测试覆盖实际 H2 SETTINGS、下载拨号继承与覆盖、Provider 刷新及循环、全局同名节点和策略组在冷启动时的优先级、零 RTT 复用与重启恢复，以及测速回退。
+
+工作流在每六小时检查、手动触发或维护分支的补丁、脚本、发行说明和工作流变动时运行。先运行 Python 测试，再通过 GitHub API 检查稳定标签对应的源码提交和补丁指纹。已发布的组合跳过源码拉取、Go 安装与编译。新组合应用补丁，使用 `go.sum` 缓存依赖，按 Go 1.26.x、`with_gvisor`、CGO=0 和 amd64 v1 测试及构建。发布使用仓库的 `GITHUB_TOKEN`（`contents: write`）。
+
+产物位于 `dist/`，包含 Windows ZIP、Linux gzip、`version.txt`、`provenance.json`、说明及 SHA256。发布前核对全部文件和构建计划，推送指向实际构建源码的标签，再上传草稿，上传成功后转为 Latest。若上传中断，重跑相同输入可用同一标签和草稿继续。草稿的未知附件或不同提交的同名标签会阻止发布，应先核对标签、构建计划与 Actions 日志。已发布版本保持原样。
+
+若补丁无法应用，查看失败的补丁、`.local/source` 和 `.local/plan.json`。若测试失败，先按日志定位 Go 包，检查环境是否支持回环和依赖是否完整。现有源码目录和非空 `dist/` 会阻止重新准备或构建，失败现场可保留在原 clone，再用新 clone 验证。真机 IPv4/IPv6 链路和 Clash Verge 应用内更新仍需对应环境验收。
