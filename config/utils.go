@@ -146,39 +146,53 @@ func proxyGroupsDagSort(groupsConfig []map[string]any) error {
 
 // validateDialerProxies checks if all dialer-proxy references are valid
 func validateDialerProxies(proxies map[string]C.Proxy) error {
-	graph := make(map[string]string) // proxy name -> dialer-proxy name
+	graph := make(map[string][]string) // proxy name -> upload and download dialers
 
-	// collect all proxies with dialer-proxy configured
 	for name, proxy := range proxies {
-		dialerProxy := proxy.ProxyInfo().DialerProxy
-		if dialerProxy != "" {
-			// validate each dialer-proxy reference
-			_, exist := proxies[dialerProxy]
-			if !exist {
+		info := proxy.ProxyInfo()
+		if dialerProxy := info.DialerProxy; dialerProxy != "" {
+			if _, exist := proxies[dialerProxy]; !exist {
 				return fmt.Errorf("proxy [%s] dialer-proxy [%s] not found", name, dialerProxy)
 			}
-
-			// build dependency graph
-			graph[name] = dialerProxy
+			graph[name] = append(graph[name], dialerProxy)
+		}
+		if dialerProxy := info.XHTTPDownloadDialerProxy; dialerProxy != "" && dialerProxy != info.DialerProxy {
+			if _, exist := proxies[dialerProxy]; !exist {
+				return fmt.Errorf("proxy [%s] xhttp download-settings dialer-proxy [%s] not found", name, dialerProxy)
+			}
+			graph[name] = append(graph[name], dialerProxy)
 		}
 	}
 
-	// every proxy has at most one dialer-proxy, so walk each chain once: reaching a proxy
-	// of the current walk means a cycle, reaching one an earlier walk finished does not
+	// XHTTP transports can start a new request context, so reject a static cycle
+	// in either direction here, before the context-based dial guard is needed.
 	const onPath, acyclic = 1, 2
 	state := make(map[string]uint8, len(graph))
-	var path []string
+	type visit struct {
+		name    string
+		leaving bool
+	}
+	var stack []visit
 	for name := range graph {
-		path = path[:0]
-		for current, ok := name, true; ok && state[current] != acyclic; current, ok = graph[current] {
-			if state[current] == onPath {
-				return fmt.Errorf("proxy [%s] has circular dialer-proxy dependency", name)
+		stack = append(stack, visit{name: name})
+		for len(stack) > 0 {
+			step := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if step.leaving {
+				state[step.name] = acyclic
+				continue
 			}
-			state[current] = onPath
-			path = append(path, current)
-		}
-		for _, p := range path {
-			state[p] = acyclic
+			switch state[step.name] {
+			case acyclic:
+				continue
+			case onPath:
+				return fmt.Errorf("proxy [%s] has circular dialer-proxy dependency", step.name)
+			}
+			state[step.name] = onPath
+			stack = append(stack, visit{name: step.name, leaving: true})
+			for _, dialer := range graph[step.name] {
+				stack = append(stack, visit{name: dialer})
+			}
 		}
 	}
 

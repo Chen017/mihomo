@@ -931,13 +931,22 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 	}
 
 	var AllProviders []string
+	// Providers are parsed before the new globals are installed into the tunnel.
+	// Include groups here as well, even though their adapters are created later.
+	globalNames := map[string]struct{}{"GLOBAL": {}}
+	for name := range proxies {
+		globalNames[name] = struct{}{}
+	}
+	for _, name := range proxyList {
+		globalNames[name] = struct{}{}
+	}
 	// parse and initial providers
 	for name, mapping := range providersConfig {
 		if name == provider.ReservedName {
 			return nil, nil, fmt.Errorf("can not defined a provider called `%s`", provider.ReservedName)
 		}
 
-		pd, err := provider.ParseProxyProvider(name, mapping, T.Tunnel)
+		pd, err := provider.ParseProxyProvider(name, mapping, T.Tunnel, globalNames)
 		if err != nil {
 			return nil, nil, fmt.Errorf("parse proxy provider %s error: %w", name, err)
 		}

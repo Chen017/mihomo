@@ -72,10 +72,22 @@ func (c *CommonConn) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-func (c *CommonConn) Read(b []byte) (int, error) {
+func (c *CommonConn) Read(b []byte) (n int, err error) {
 	if len(b) == 0 {
 		return 0, nil
 	}
+	// A restarted server may close before sending its ticket-rejection noise.
+	// Until the first authenticated record, any read failure invalidates only
+	// this session's ticket. Never replay application data automatically.
+	defer func() {
+		if err != nil && c.Client != nil {
+			c.Client.RWLock.Lock()
+			if bytes.HasPrefix(c.UnitedKey, c.Client.PfsKey) {
+				c.Client.Expire = time.Now()
+			}
+			c.Client.RWLock.Unlock()
+		}
+	}()
 	if c.PeerAEAD == nil { // client's 0-RTT
 		serverRandom := make([]byte, 16)
 		if _, err := io.ReadFull(c.Conn, serverRandom); err != nil {
@@ -105,16 +117,10 @@ func (c *CommonConn) Read(b []byte) (int, error) {
 	l, err := DecodeHeader(peerHeader[:]) // l: 17~17000
 	if err != nil {
 		if c.Client != nil && errors.Is(err, ErrInvalidHeader) { // client's 0-RTT
-			c.Client.RWLock.Lock()
-			if bytes.HasPrefix(c.UnitedKey, c.Client.PfsKey) {
-				c.Client.Expire = time.Now() // expired
-			}
-			c.Client.RWLock.Unlock()
 			return 0, errors.New("new handshake needed")
 		}
 		return 0, err
 	}
-	c.Client = nil
 	if c.rawInput.Cap() < l {
 		c.rawInput.Grow(l) // no need to use sync.Pool, because we are always reading
 	}
@@ -137,6 +143,7 @@ func (c *CommonConn) Read(b []byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	c.Client = nil // A valid header alone does not authenticate a resumed session.
 	if len(dst) > len(b) {
 		c.input.Reset(dst[copy(b, dst):])
 		dst = b // for len(dst)

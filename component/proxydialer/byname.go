@@ -7,6 +7,7 @@ import (
 	"net/netip"
 
 	C "github.com/metacubex/mihomo/constant"
+	P "github.com/metacubex/mihomo/constant/provider"
 )
 
 type Tunnel interface {
@@ -15,36 +16,70 @@ type Tunnel interface {
 }
 
 type byNameProxyDialer struct {
-	proxyName string
-	tunnel    C.Tunnel
+	proxyName    string
+	providerName string
+	tunnel       C.Tunnel
+}
+
+type dialerPathKey struct{}
+type dialerTarget struct{ provider, proxy string }
+
+func (d byNameProxyDialer) resolve(ctx context.Context) (context.Context, C.Proxy, error) {
+	t, ok := d.tunnel.(Tunnel)
+	if !ok {
+		return ctx, nil, fmt.Errorf("tunnel is invalid, must be proxydialer.Tunnel, but got: %T", d.tunnel)
+	}
+	path, _ := ctx.Value(dialerPathKey{}).([]dialerTarget)
+	target := dialerTarget{d.providerName, d.proxyName}
+	for _, previous := range path {
+		if previous == target {
+			return ctx, nil, fmt.Errorf("dialer-proxy cycle at %s", d.proxyName)
+		}
+	}
+	if len(path) >= 32 {
+		return ctx, nil, fmt.Errorf("dialer-proxy chain exceeds 32 hops")
+	}
+	ctx = context.WithValue(ctx, dialerPathKey{}, append(append([]dialerTarget(nil), path...), target))
+	if proxy := t.Proxies()[d.proxyName]; proxy != nil {
+		return ctx, proxy, nil
+	}
+	if d.providerName != "" {
+		if source, ok := d.tunnel.(interface {
+			Providers() map[string]P.ProxyProvider
+		}); ok {
+			if provider := source.Providers()[d.providerName]; provider != nil {
+				for _, proxy := range provider.Proxies() {
+					if proxy.Name() == d.proxyName {
+						provider.Touch()
+						return ctx, proxy, nil
+					}
+				}
+			}
+		}
+	}
+	return ctx, nil, fmt.Errorf("proxyName[%s] not found in globals or provider[%s]", d.proxyName, d.providerName)
 }
 
 func (d byNameProxyDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	tunnel, _ := d.tunnel.(Tunnel)
-	if tunnel == nil {
-		return nil, fmt.Errorf("tunnel is invalid, must be proxydialer.Tunnel, but got: %T", d.tunnel)
-	}
-	proxies := tunnel.Proxies()
-	proxy, ok := proxies[d.proxyName]
-	if !ok {
-		return nil, fmt.Errorf("proxyName[%s] not found", d.proxyName)
+	ctx, proxy, err := d.resolve(ctx)
+	if err != nil {
+		return nil, err
 	}
 	return New(proxy, true).DialContext(ctx, network, address)
 }
 
 func (d byNameProxyDialer) ListenPacket(ctx context.Context, network, address string, rAddrPort netip.AddrPort) (net.PacketConn, error) {
-	tunnel, _ := d.tunnel.(Tunnel)
-	if tunnel == nil {
-		return nil, fmt.Errorf("tunnel is invalid, must be proxydialer.Tunnel, but got: %T", d.tunnel)
-	}
-	proxies := tunnel.Proxies()
-	proxy, ok := proxies[d.proxyName]
-	if !ok {
-		return nil, fmt.Errorf("proxyName[%s] not found", d.proxyName)
+	ctx, proxy, err := d.resolve(ctx)
+	if err != nil {
+		return nil, err
 	}
 	return New(proxy, true).ListenPacket(ctx, network, address, rAddrPort)
 }
 
-func NewByName(proxyName string, tunnel C.Tunnel) C.Dialer {
-	return byNameProxyDialer{proxyName: proxyName, tunnel: tunnel}
+func NewByName(proxyName string, tunnel C.Tunnel, providerName ...string) C.Dialer {
+	d := byNameProxyDialer{proxyName: proxyName, tunnel: tunnel}
+	if len(providerName) > 0 {
+		d.providerName = providerName[0]
+	}
+	return d
 }

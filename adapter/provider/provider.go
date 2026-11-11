@@ -340,7 +340,7 @@ func (cp *CompatibleProvider) Close() error {
 	return cp.compatibleProvider.Close()
 }
 
-func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilter string, excludeType string, dialerProxy string, override overrideSchema, ageSecretKey string) (resource.Parser[[]C.Proxy], error) {
+func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilter string, excludeType string, dialerProxy string, override overrideSchema, ageSecretKey string, globalNames ...map[string]struct{}) (resource.Parser[[]C.Proxy], error) {
 	var excludeTypeArray []string
 	if excludeType != "" {
 		excludeTypeArray = strings.Split(excludeType, "|")
@@ -394,6 +394,7 @@ func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilt
 		}
 
 		proxies := []C.Proxy{}
+		mappings := []map[string]any{}
 		proxiesSet := map[string]struct{}{}
 		for _, filterReg := range filterRegs {
 		LOOP1:
@@ -453,6 +454,7 @@ func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilt
 
 				proxiesSet[name] = struct{}{}
 				proxies = append(proxies, proxy)
+				mappings = append(mappings, mapping)
 			}
 		}
 
@@ -463,6 +465,22 @@ func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilt
 			return nil, errors.New("file doesn't have any proxy")
 		}
 
+		globals := map[string]struct{}{}
+		if len(globalNames) > 0 {
+			globals = globalNames[0]
+		} else if source, ok := tunnel.(interface{ Proxies() map[string]C.Proxy }); ok {
+			for name, proxy := range source.Proxies() {
+				if proxy != nil {
+					globals[name] = struct{}{}
+				}
+			}
+		}
+		if err := validateProviderDialers(mappings, globals); err != nil {
+			for _, proxy := range proxies {
+				_ = proxy.Close()
+			}
+			return nil, err
+		}
 		return proxies, nil
 	}, nil
 }
