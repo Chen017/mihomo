@@ -26,6 +26,8 @@ permissions:
 
 jobs:
   release:
+    outputs:
+      patch_conflict: ${{ steps.prepare.outputs.patch_conflict }}
     if: github.repository == 'Chen017/mihomo'
     runs-on: ubuntu-latest
     timeout-minutes: 35
@@ -64,3 +66,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/window_release.py publish
+
+  ai-repair:
+    needs: release
+    if: ${{ always() && needs.release.outputs.patch_conflict == 'true' && github.event_name != 'pull_request' }}
+    uses: ./.github/workflows/ai-patch-repair.yml
+    permissions:
+      contents: write
+      pull-requests: write
+      copilot-requests: write
