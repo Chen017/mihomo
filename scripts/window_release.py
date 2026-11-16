@@ -87,7 +87,13 @@ def prepare(tag, verify=False):
             mode = 'already present upstream'
         else:
             # A conflicted merge exits nonzero and stops this run before tests/build/publish.
-            run('git', 'apply', '--3way', str(patch), cwd=SOURCE)
+            try:
+                run('git', 'apply', '--3way', str(patch), cwd=SOURCE)
+            except subprocess.CalledProcessError:
+                if output_path := os.environ.get('GITHUB_OUTPUT'):
+                    with open(output_path, 'a', encoding='utf-8') as stream:
+                        stream.write('patch_conflict=true\n')
+                raise
             selected = patch
             mode = 'clean three-way merge'
         for line in run('git', 'apply', '--numstat', str(selected), cwd=SOURCE, capture=True).splitlines():
