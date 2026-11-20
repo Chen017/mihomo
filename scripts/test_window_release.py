@@ -20,10 +20,11 @@ class ReleaseRecipeTest(unittest.TestCase):
         self.enterContext(patch.dict(os.environ, {'GITHUB_OUTPUT': ''}))
         self.upstream_commit = 'a' * 40
         self.plan = {
-            'version': 'v1.19.32-window.aaaaaaaa.bbbbbbbb',
+            'version': 'v1.19.32-personal',
             'build_needed': True,
             'upstream_tag': 'v1.19.32',
             'upstream_commit': self.upstream_commit,
+            'upstream_notes': '## Upstream Changes\n- Fixed bug A',
             'source_commit': 'b' * 40,
             'patch_sha256': 'c' * 64,
             'go_version': 'go version go1.26.8 linux/amd64',
@@ -40,15 +41,35 @@ class ReleaseRecipeTest(unittest.TestCase):
         (release.DIST / 'version.txt').write_text(self.plan['version'] + '\n', encoding='utf-8')
         (release.DIST / 'checksums.txt').write_text(release.checksums(payloads), encoding='utf-8')
 
+    def test_next_version_uses_clean_personal_and_increments_only_same_upstream(self):
+        self.assertEqual(release.next_version('v1.19.32', []), 'v1.19.32-personal')
+        refs = [{'ref': 'refs/tags/v1.19.32-personal'}]
+        self.assertEqual(release.next_version('v1.19.32', refs), 'v1.19.32-personal.2')
+        refs.append({'ref': 'refs/tags/v1.19.32-personal.2'})
+        self.assertEqual(release.next_version('v1.19.32', refs), 'v1.19.32-personal.3')
+        self.assertEqual(release.next_version('v1.19.33', refs), 'v1.19.33-personal')
+
+    def test_format_release_notes_puts_upstream_before_personal_customizations(self):
+        notes = release.format_release_notes(self.plan)
+        self.assertTrue(notes.startswith('## Upstream Changes\n- Fixed bug A'))
+        self.assertIn('\n\n---\n\n## Personal Customizations\n', notes)
+        self.assertIn(self.plan['upstream_commit'], notes)
+
     def test_published_input_skips_source_fetch(self):
-        existing = subprocess.CompletedProcess([], 0, stdout='{"draft": false}', stderr='')
-        upstream = {'tag_name': 'v1.19.32', 'draft': False, 'prerelease': False}
+        upstream = {'tag_name': 'v1.19.32', 'draft': False, 'prerelease': False, 'body': 'Upstream notes'}
+        previous = {
+            'version': 'v1.19.32-window.aaaaaaaa.bbbbbbbb',
+            'upstream_commit': self.upstream_commit,
+            'patch_sha256': 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+        }
         with patch.object(release, 'api', return_value=upstream), \
                 patch.object(release, 'run', side_effect=[self.upstream_commit, 'maintenance']) as run, \
-                patch.object(release.subprocess, 'run', return_value=existing):
+                patch.object(release, 'latest_published_provenance', return_value=previous):
             release.prepare('')
         self.assertEqual([call.args[:2] for call in run.call_args_list], [('gh', 'api'), ('git', 'rev-parse')])
-        self.assertFalse(json.loads(release.PLAN.read_text(encoding='utf-8'))['build_needed'])
+        saved = json.loads(release.PLAN.read_text(encoding='utf-8'))
+        self.assertFalse(saved['build_needed'])
+        self.assertEqual(saved['upstream_notes'], 'Upstream notes')
 
     def test_changed_tag_stops_before_worktree(self):
         upstream = {'tag_name': 'v1.19.32', 'draft': False, 'prerelease': False}

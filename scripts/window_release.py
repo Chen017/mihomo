@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import urllib.request
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +32,74 @@ def api(*args):
     return json.loads(run('gh', 'api', *args, capture=True))
 
 
+def read_url(url):
+    with urllib.request.urlopen(url, timeout=60) as response:
+        return response.read()
+
+
+def latest_published_provenance():
+    result = subprocess.run(['gh', 'api', f'repos/{FORK}/releases/latest'], capture_output=True, text=True)
+    if result.returncode:
+        if '404' in result.stderr or '404' in result.stdout:
+            return None
+        raise RuntimeError(result.stderr or result.stdout)
+    release = json.loads(result.stdout)
+    if release.get('draft'):
+        return None
+    asset = next((a for a in release.get('assets', []) if a['name'] == 'provenance.json'), None)
+    if asset is None:
+        return None
+    try:
+        data = json.loads(read_url(asset['browser_download_url']))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def matching_tag_refs(prefix):
+    result = subprocess.run(['gh', 'api', f'repos/{FORK}/git/matching-refs/tags/{prefix}'],
+                            capture_output=True, text=True)
+    if result.returncode:
+        if '404' in result.stderr or '404' in result.stdout:
+            return []
+        raise RuntimeError(result.stderr or result.stdout)
+    return json.loads(result.stdout)
+
+
+def next_version(tag, refs):
+    base = f'{tag}-personal'
+    numbers = []
+    for ref in refs:
+        name = ref['ref']
+        if name == f'refs/tags/{base}':
+            numbers.append(1)
+        elif match := re.fullmatch(rf'refs/tags/{re.escape(base)}\.(\d+)', name):
+            numbers.append(int(match[1]))
+    if not numbers:
+        return base
+    return f'{base}.{max(numbers) + 1}'
+
+
+def format_release_notes(plan):
+    upstream_notes = (plan.get('upstream_notes') or '').strip()
+    custom = (
+        '## Personal Customizations\n\n'
+        f'Unofficial build of `{UPSTREAM}` `{plan["upstream_tag"]}` with maintained transport patches:\n'
+        '- Configurable XHTTP H2 window (`h2-max-receive-buffer-per-stream`), defaults unchanged\n'
+        '- Independent XHTTP download dialers (`download-settings.dialer-proxy`)\n'
+        '- Scoped proxy-provider chaining and validation\n'
+        '- VLESS 0-RTT ticket recovery and unified-delay warm fallback fixes\n\n'
+        'See `WINDOW-CORE.md` for setup and rollback.\n\n'
+        f'- Upstream: `{plan["upstream_commit"]}`\n'
+        f'- Patch SHA256: `{plan["patch_sha256"]}`\n'
+        f'- Source: `{plan["source_commit"]}`\n'
+        f'- Compiler: `{plan["go_version"]}`\n'
+    )
+    if upstream_notes:
+        return f'{upstream_notes}\n\n---\n\n{custom}'
+    return custom
+
+
 def save(plan):
     PLAN.write_text(json.dumps(plan, indent=2) + '\n', encoding='utf-8')
 
@@ -47,16 +116,19 @@ def prepare(tag, verify=False):
         raise RuntimeError(f'GitHub did not return a commit SHA for {tag}')
     patch_files = sorted((ROOT / 'patches').rglob('*.patch'))
     patch_sha = hashlib.sha256(b''.join(p.relative_to(ROOT).as_posix().encode() + b'\0' + p.read_bytes() for p in patch_files)).hexdigest()
-    version = f'{tag}-window.{upstream_sha[:8]}.{patch_sha[:8]}'
     needed = True
+    version = f'{tag}-personal'
     if not verify:
-        existing = subprocess.run(['gh', 'api', f'repos/{FORK}/releases/tags/{version}'],
-                                  capture_output=True, text=True)
-        if existing.returncode and '(HTTP 404)' not in existing.stderr and '(HTTP 404)' not in existing.stdout:
-            raise RuntimeError(existing.stderr or existing.stdout)
-        needed = existing.returncode != 0 or json.loads(existing.stdout)['draft']
+        previous = latest_published_provenance()
+        if (previous and previous.get('upstream_commit') == upstream_sha
+                and previous.get('patch_sha256') == patch_sha):
+            needed = False
+            version = previous.get('version') or version
+        else:
+            version = next_version(tag, matching_tag_refs(f'{tag}-personal'))
     plan = {'upstream_repository': UPSTREAM, 'upstream_tag': tag,
-            'upstream_commit': upstream_sha, 'patch_sha256': patch_sha,
+            'upstream_commit': upstream_sha, 'upstream_notes': (release.get('body') or '').strip(),
+            'patch_sha256': patch_sha,
             'maintenance_commit': run('git', 'rev-parse', 'HEAD', capture=True),
             'version': version, 'build_needed': needed, 'verification_only': verify}
     save(plan)
@@ -220,13 +292,10 @@ def publish():
     # A push of the same commit is safe to retry. A different existing tag is rejected by Git.
     run('git', '-c', 'credential.helper=', '-c', 'credential.helper=!gh auth git-credential',
         'push', f'https://github.com/{FORK}.git', f'{plan["source_commit"]}:refs/tags/{version}')
-    notes = (f'Unofficial build of {UPSTREAM} {plan["upstream_tag"]}: configurable XHTTP H2 window, independent download dialers, scoped provider chaining, 0-RTT ticket recovery and unified-delay fallback fixes. '
-             'Window defaults are unchanged; no extra retries or timeout extensions. See WINDOW-CORE.md for setup and rollback.\n\n'
-             f'Upstream: `{plan["upstream_commit"]}`\nPatch SHA256: `{plan["patch_sha256"]}`\n'
-             f'Source: `{plan["source_commit"]}`\nCompiler: `{plan["go_version"]}`\n')
+    notes = format_release_notes(plan)
     notes_file = WORK / 'release-notes.md'
     notes_file.write_text(notes, encoding='utf-8')
-    title = f'{plan["upstream_tag"]} + XHTTP NAT split and transport fixes'
+    title = version
     if not release:
         # With assets, gh uploads them to a draft before publishing the release.
         run('gh', 'release', 'create', version, '--repo', FORK, '--verify-tag', '--latest',
